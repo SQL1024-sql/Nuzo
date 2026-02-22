@@ -1,2 +1,2 @@
-# Nuzo
-釣魚機器人
+# Nuro
+Discord機器人
