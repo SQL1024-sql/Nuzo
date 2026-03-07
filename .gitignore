@@ -3,3 +3,36 @@ neuro_model_smart/adapter_model.safetensors
 bot_token.txt
 __pycache__/
 *.pyc
+
+# Python caches / artifacts
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+env/
+
+# Environment variables / local secrets
+.env
+.env.*
+
+# Build outputs
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log

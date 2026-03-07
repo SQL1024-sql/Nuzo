@@ -89,7 +89,7 @@
             "blackjack_games": 3
         },
         "763033832227078176": {
-            "coin": 8088404,
+            "coin": 61883040,
             "exp": 28,
             "level": 10,
             "stocks": {
@@ -100,11 +100,11 @@
             "last_hourly_slot": 1772762400,
             "bank_balance": 0,
             "loan": 200000,
-            "boat_level": 19,
+            "boat_level": 20,
             "rod_level": 20,
-            "blackjack_pnl": 190994278,
-            "blackjack_games": 534,
-            "blackjack_wins": 241
+            "blackjack_pnl": 263788914,
+            "blackjack_games": 540,
+            "blackjack_wins": 244
         },
         "868361854748074065": {
             "coin": 5289020,
