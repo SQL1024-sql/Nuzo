@@ -1,0 +1,5 @@
+.venv/
+neuro_model_smart/adapter_model.safetensors
+bot_token.txt
+__pycache__/
+*.pyc

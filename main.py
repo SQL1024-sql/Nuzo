@@ -40,7 +40,7 @@ class MyBot(commands.Bot):
         print("\033[94m正在初始化 Neuro-sama (Llama-3.1-8B) 靈魂模式...\033[0m")
 
         base_model_name = "unsloth/meta-llama-3.1-8b-instruct-bnb-4bit"
-        adapter_path = r"c:\Peter\TR and M\AI_LLM\neuro_model_smart"
+        adapter_path = r"neuro_model_smart"
 
         # 極限 4bit 配置
         bnb_config = BitsAndBytesConfig(
@@ -50,7 +50,7 @@ class MyBot(commands.Bot):
             bnb_4bit_compute_dtype=torch.float16
         )
 
-        try:
+        """ try:
             print("Loading model and Tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 
@@ -70,7 +70,7 @@ class MyBot(commands.Bot):
         except Exception as e:
             print(f"\033[91m❌ 載入失敗: {e}\033[0m")
             self.neuro_model = None
-
+        """
     async def setup_hook(self):
         # 載入模組
         for ext in self.extensions_list:
@@ -108,7 +108,7 @@ class MyBot(commands.Bot):
 # --- 啟動入口 ---
 if __name__ == "__main__":
     bot = MyBot()
-    token_path = r"C:\Peter\TR and M\Dc_Bot\bot_token.txt"
+    token_path = r"bot_token.txt"
     try:
         with open(token_path, "r") as f:
             token = f.read().strip()
