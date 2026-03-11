@@ -121,7 +121,7 @@ class BankMod(commands.Cog):
     @app_commands.guild_only()
     async def add_coins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
         # --- 權限檢查：將 "你的ID" 替換成你真正的 Discord ID ---
-        YOUR_ID = [1170599058717560875, 665170783181733898, 1449416191272816650, 763033832227078176]  # 請在此處輸入你的數位 ID
+        YOUR_ID = [1170599058717560875, 1449416191272816650, 763033832227078176]  # 請在此處輸入你的數位 ID
         if interaction.user.id not in YOUR_ID:
             await interaction.response.send_message("❌ 權限不足：只有指定人員可以執行此操作。", ephemeral=True)
             return

@@ -1667,6 +1667,34 @@ class MyCommands(commands.Cog):
             else:
                 await interaction.response.send_message(f"ℹ️ 名單中找不到 {target.display_name}。")
 
+    @app_commands.command(name="announce", description="【Admin】發送系統公告到指定文字頻道")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(channel="要發送公告的文字頻道", content="公告內容")
+    async def announce(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+        content: str
+    ):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ 你沒有管理員權限。", ephemeral=True)
+
+        if not content.strip():
+            return await interaction.response.send_message("❌ 公告內容不能是空白。", ephemeral=True)
+
+        embed = discord.Embed(description=f"# 📢 系統公告\n\n{content}", color=0xff0000)
+        embed.set_author(name="NuSo 系統核心", icon_url=self.bot.user.avatar.url if self.bot.user and self.bot.user.avatar else None)
+        embed.timestamp = datetime.now()
+
+        try:
+            await channel.send(embed=embed)
+            await interaction.response.send_message(f"✅ 公告已發送至 {channel.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ 我在該頻道沒有發送訊息權限。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 發送失敗：{e}", ephemeral=True)
+
     # 個人資料指令
     @app_commands.command(name="profile", description="查看你在本伺服器的個人資料與資產概況")
     @app_commands.guild_only()
