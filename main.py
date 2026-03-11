@@ -82,6 +82,8 @@ class MyBot(commands.Bot):
 
         # 同步斜線指令
         try:
+            # 將全部的廣域指令(Global)複製到特定的伺服器然後同步，這樣既不會有重複，也能立刻生效
+            self.tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
             await self.tree.sync(guild=discord.Object(id=GUILD_ID))
             print(f"✅ 指令已同步至伺服器: {GUILD_ID}")
         except Exception as e:

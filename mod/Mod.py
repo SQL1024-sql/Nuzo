@@ -95,968 +95,22 @@ ROB_PLOTS = {
 }
 
 # 讀取授權名單的工具函式
-def load_allowed_users():
-    config_path = "config.json"
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f).get("allowed_users", [])
-    return []
-def save_allowed_users(user_list):
-    with open("config.json", "w", encoding="utf-8") as f:
-        json.dump({"allowed_users": user_list}, f, indent=4)
+from .features.views import (
+    BLACKJACK_AVATAR_URL,
+    BlackjackView,
+    DragonGateView,
+    RedPacketView,
+    FishingView,
+    FishConfirmView,
+    FishActiveView,
+    FishCancelConfirmView,
+    SecretModal,
+    SecretView,
+    RobBankView,
+    load_allowed_users,
+    save_allowed_users
+)
 
-# 釣魚
-class FishingView(discord.ui.View):
-    def __init__(self, interaction, cog_instance):
-        super().__init__(timeout=None)
-        self.cog = cog_instance
-        self.uid = str(interaction.user.id)
-
-# 釣魚確認 View（確認後才執行出海）
-class FishConfirmView(discord.ui.View):
-    def __init__(self, interaction, cog_instance, times, cost, boat_lv, rod_lv, per_fish_time, duration, finish_time):
-        super().__init__(timeout=60)
-        self.interaction = interaction
-        self.cog = cog_instance
-        self.uid = interaction.user.id
-        self.times = times
-        self.cost = cost
-        self.boat_lv = boat_lv
-        self.rod_lv = rod_lv
-        self.per_fish_time = per_fish_time
-        self.duration = duration
-        self.finish_time = finish_time
-        self.pa = pyaudio.PyAudio()
-        self.loop = asyncio.get_event_loop()
-
-    @discord.ui.button(label="確認出海", style=discord.ButtonStyle.green)
-    async def confirm_fish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.uid:
-            return await interaction.response.send_message("❌ 這不是你的釣魚任務！", ephemeral=True)
-
-        await self.cog.execute_fish_start(interaction, self)
-
-# 出海後的控制面板（中途返航）
-class FishActiveView(discord.ui.View):
-    def __init__(self, cog_instance, user_id):
-        super().__init__(timeout=None)
-        self.cog = cog_instance
-        self.uid = str(user_id)
-
-    @discord.ui.button(label="🚨 中途返航（不退費）", style=discord.ButtonStyle.danger)
-    async def cancel_fish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.uid:
-            return await interaction.response.send_message("❌ 這不是你的釣魚任務！", ephemeral=True)
-
-        all_fishers = self.cog.get_all_fishers()
-        data = all_fishers.get(self.uid)
-        if not data:
-            return await interaction.response.send_message("⚠️ 找不到你的釣魚紀錄，可能已經結算了。", ephemeral=True)
-
-        end_time = data.get("end_time")
-        if isinstance(end_time, str):
-            try:
-                end_time = datetime.fromisoformat(end_time)
-            except Exception:
-                pass
-        now = datetime.now()
-        if end_time and now >= end_time:
-            await interaction.response.send_message("🏁 你的漁船已經回港了！請使用 `/fish` 領取成果。", ephemeral=True)
-            return
-
-        times = data.get("times", 1)
-        original_cost = times * 50
-
-        # 彈出確認畫面（只有使用者看得到）
-        confirm_view = FishCancelConfirmView(self.cog, self.uid, original_cost, self)
-        embed = discord.Embed(title="⚠️ 確認中途返航？", color=0xff9900)
-        embed.description = (
-            f"你確定要取消釣魚任務嗎？\n\n"
-            f"💸 **出海費用：** `${original_cost:,}`\n"
-            f"❌ **費用不予退還**\n\n"
-            "此操作無法撤銷！"
-        )
-        await interaction.response.send_message(embed=embed, view=confirm_view, ephemeral=True)
-
-# 中途返航二次確認（ephemeral，只有使用者看得到）
-class FishCancelConfirmView(discord.ui.View):
-    def __init__(self, cog_instance, user_id, original_cost, active_view):
-        super().__init__(timeout=30)
-        self.cog = cog_instance
-        self.uid = str(user_id)
-        self.original_cost = original_cost
-        self.active_view = active_view
-
-    @discord.ui.button(label="✅ 確認返航", style=discord.ButtonStyle.danger)
-    async def confirm_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.uid:
-            return
-
-        all_fishers = self.cog.get_all_fishers()
-        data = all_fishers.get(self.uid)
-        if not data:
-            return await interaction.response.edit_message(content="⚠️ 找不到你的釣魚紀錄，可能已經結算了。", embed=None, view=None)
-
-        # 移除釣魚紀錄（不退費）
-        self.cog.remove_fisher(self.uid)
-
-        # 停用確認畫面按鈕
-        for item in self.children:
-            item.disabled = True
-
-        embed = discord.Embed(title="🚨 中途返航", color=0xe74c3c)
-        embed.description = (
-            f"<@{self.uid}> 已取消釣魚任務！\n\n"
-            f"💸 **出海費用：** `${self.original_cost:,}`\n"
-            f"⚠️ **費用不予退還**\n\n"
-            "下次出海前請三思！"
-        )
-        # 先更新 ephemeral 確認畫面
-        await interaction.response.edit_message(content="✅ 已確認返航。", embed=None, view=None)
-        # 再發一則公開訊息讓所有人看到
-        await interaction.followup.send(embed=embed)
-
-    @discord.ui.button(label="🔙 取消", style=discord.ButtonStyle.secondary)
-    async def cancel_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.uid:
-            return
-
-        await interaction.response.edit_message(content="✅ 已取消返航，繼續釣魚中！", embed=None, view=None)
-
-# blackjack 介面設定
-BLACKJACK_AVATAR_URL = None  # 可設為角色頭像圖網址，例如 "https://i.imgur.com/xxx.png"
-
-# blackjack 按鈕邏輯 View
-class BlackjackView(discord.ui.View):
-    def _rank_to_key(self, rank):
-        # 將 J/Q/K/A 轉為小寫字母，其餘維持原數字
-        face_map = {"J": "j", "Q": "q", "K": "k", "A": "a"}
-        return face_map.get(rank, rank)
-
-    def __init__(self, interaction, p_hand, d_hand, deck, calc_func, bank, bet, cog_instance):
-        super().__init__(timeout=180)
-        self.main_interaction = interaction
-        self.p_hand = p_hand
-        self.d_hand = d_hand
-        self.deck = deck
-        self.calc = calc_func
-        self.bank = bank
-        self.bet = bet
-        self.uid = str(interaction.user.id)
-        self.gid = str(interaction.guild.id)
-        self.cog = cog_instance
-        self.root_dir = os.path.dirname(os.path.abspath(__file__))
-        self.DATA_PATH = os.path.join(self.root_dir, "active_fishers.json")
-        # 初始化花色與 emoji 對照表
-        self.suits_map = {"♠️": "s", "♥️": "h", "♦️": "d", "♣️": "c"}
-        self.card_emoji_ids = {
-            "sq": 1472706402933018726, "sk": 1472706401557020763, "sj": 1472706399996743731, "sa": 1472706398029746329,
-            "s10": 1472706396343505030, "s9": 1472706394628165642, "s8": 1472706393004965888, "s7": 1472706391629107321,
-            "s6": 1472706389938933834, "s5": 1472706388374589560, "s4": 1472706386889670821, "s3": 1472706385266475113,
-            "s2": 1472706384217768150,
-            "hq": 1472706380468191446, "hk": 1472706378538680432, "hj": 1472706376986791996, "ha": 1472706375183368267,
-            "h10": 1472706373749047464, "h9": 1472706372608069906, "h8": 1472706370875691210, "h7": 1472706369327988927,
-            "h6": 1472706367931420722, "h5": 1472706365977002186, "h4": 1472706364039102556, "h3": 1472706362214584340,
-            "h2": 1472706360700567552,
-            "dq": 1472706358850752532, "dk": 1472706357139341444, "dj": 1472706355117953114, "da": 1472706353599615157,
-            "d10": 1472706351971958939, "d9": 1472706349652508722, "d8": 1472706348109271060, "d7": 1472706346397995028,
-            "d6": 1472706344233599242, "d5": 1472706342606082161, "d4": 1472706341230608414, "d3": 1472706339842031824,
-            "d2": 1472706338160377926,
-            "cq": 1472706336142790770, "ck": 1472706334481973419, "cj": 1472706332749598770, "ca": 1472706330988122245,
-            "c10": 1472706329499013212, "c9": 1472706327401726165, "c8": 1472706325761888336, "c7": 1472706324340015225,
-            "c6": 1472706322926669844, "c5": 1472706321383162012, "c4": 1472706319793393860, "c3": 1472706318304284833,
-            "c2": 1472706316375031879,
-            "card_back": 1472706314969944247,
-        }
-    # 其餘方法同樣左對齊 class
-    def _get_bj_control(self):
-        # 每次都重新讀取 C:\\Peter\\TR and M\\Dc_Bot\\mod\\blackjack_control.json
-        try:
-            bj_path = os.path.join(self.root_dir, "blackjack_control.json")
-            if os.path.exists(bj_path):
-                with open(bj_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return data.get(str(self.uid))
-        except Exception as e:
-            print(f"[BJ控制] 讀取失敗: {e}")
-        return None
-
-    def get_controlled_card(self, who, for_dealer=False):
-        """
-        who: 'player' or 'dealer'
-        for_dealer: True if dealer抽牌
-        """
-        control = self._get_bj_control()
-        mode = (control or {}).get("mode", "").lower()
-        # --- 必贏模式 ---
-        if mode == 'w':
-            if who == 'player':
-                cur = self.calc(self.p_hand)
-                # 若點數已高(18-20)，只給A/2/3等小牌
-                if cur >= 18:
-                    safe_cards = []
-                    for i, card in enumerate(self.deck):
-                        val = self.calc(self.p_hand + [card])
-                        # 僅允許21以下，且優先A/2/3
-                        if val <= 21:
-                            rank = str(card[:-2]).upper()
-                            if rank in ('A', '2', '3'):
-                                safe_cards.append((i, card))
-                    if safe_cards:
-                        idx, card = safe_cards[0]
-                        return self.deck.pop(idx)
-                # 其他情況，給任何不爆的牌
-                for i, card in enumerate(self.deck):
-                    val = self.calc(self.p_hand + [card])
-                    if val <= 21:
-                        return self.deck.pop(i)
-                # 沒有安全牌就pop
-                return self.deck.pop()
-            elif who == 'dealer' and for_dealer:
-                p_val = self.calc(self.p_hand)
-                d_val = self.calc(self.d_hand)
-                # 玩家點數高(>=19)，莊家只能停在小於玩家
-                if p_val >= 19:
-                    for i, card in enumerate(self.deck):
-                        val = self.calc(self.d_hand + [card])
-                        if val < p_val and val >= 17:
-                            return self.deck.pop(i)
-                    # 若無法精準控制，給最小不爆牌
-                    min_card = None
-                    min_val = 99
-                    for i, card in enumerate(self.deck):
-                        val = self.calc(self.d_hand + [card])
-                        if val <= 21 and val < min_val:
-                            min_card = (i, card)
-                            min_val = val
-                    if min_card:
-                        idx, card = min_card
-                        return self.deck.pop(idx)
-                # 玩家點數較低(<=16)，莊家爆牌
-                elif p_val <= 16:
-                    for i, card in enumerate(self.deck):
-                        val = self.calc(self.d_hand + [card])
-                        if val > 21:
-                            return self.deck.pop(i)
-                # 其他情況正常pop
-                return self.deck.pop()
-        # --- 必輸模式 ---
-        if mode == 'l':
-            if who == 'player':
-                cur = self.calc(self.p_hand)
-                # 16以下隨機給牌
-                if cur <= 16:
-                    idx = random.randrange(len(self.deck))
-                    return self.deck.pop(idx)
-                # 17以上，強制爆牌
-                else:
-                    for i, card in enumerate(self.deck):
-                        val = self.calc(self.p_hand + [card])
-                        if val > 21:
-                            return self.deck.pop(i)
-                    # 若找不到爆牌，給最大牌
-                    max_card = max(enumerate(self.deck), key=lambda x: self._card_value(x[1]))
-                    return self.deck.pop(max_card[0])
-            elif who == 'dealer' and for_dealer:
-                p_val = self.calc(self.p_hand)
-                d_val = self.calc(self.d_hand)
-                # 讓莊家大於玩家且<=21，優先21或大1點
-                best = None
-                for i, card in enumerate(self.deck):
-                    val = self.calc(self.d_hand + [card])
-                    if d_val < 17 and val > p_val and val <= 21:
-                        # 優先21或大1點
-                        if val == 21:
-                            return self.deck.pop(i)
-                        if not best or val < best[1]:
-                            best = (i, val)
-                if best:
-                    return self.deck.pop(best[0])
-        # 無控制時正常發牌
-        return self.deck.pop()
-
-    def get_card_emoji(self, card_str, use_card_back=False):
-        """將 'J♥️' 轉為 Discord 自訂 emoji 字串 <:名稱:id>（你機器人伺服器上的 emoji 會直接顯示）"""
-        if use_card_back:
-            eid = self.card_emoji_ids.get("card_back")
-            if eid:
-                return f"<:card_back:{eid}>"
-            return "🂠"
-        rank = card_str[:-2]
-        suit_icon = card_str[-2:]
-        suit = self.suits_map.get(suit_icon, "s")
-        key = f"{suit}{self._rank_to_key(rank)}"
-        eid = self.card_emoji_ids.get(key)
-        if eid:
-            return f"<:{key}:{eid}>"
-        return "🃏"
-
-    @discord.ui.button(label="要牌", style=discord.ButtonStyle.primary)
-    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.uid:
-            return await interaction.response.send_message("這不是你的牌局！", ephemeral=True)
-
-        # 每次都重新讀取控制
-        card = self.get_controlled_card('player')
-        self.p_hand.append(card)
-        p_val = self.calc(self.p_hand)
-        
-        # 1. 檢查 Five Card Charlie (5張牌且不爆)
-        if len(self.p_hand) == 5 and p_val <= 21:
-             msg, res_type, color = "🎉 恭喜！過五關！", 'win', discord.Color.purple()
-             payout = int(self.bet + (self.bet * 1.25))
-             pnl_delta = int(self.bet * 1.25)
-             
-             # 特殊結算
-             self.clear_items()
-             self.bank.users = self.bank.load_data()
-             user_data = self.bank.add_stats(self.gid, self.uid, coin=payout)
-             user_data["blackjack_pnl"] = user_data.get("blackjack_pnl", 0) + pnl_delta
-             user_data["blackjack_wins"] = user_data.get("blackjack_wins", 0) + 1
-             user_data["blackjack_games"] = user_data.get("blackjack_games", 0) + 1
-             self.bank.save_data()
-
-             # 顯示全手牌 (莊家不用補牌，直接開)
-             d_val = self.calc(self.d_hand) # 莊家可能只有2張
-             d_val_str = f"{d_val} 🔥" if d_val == 21 else f"{d_val}"
-             d_emojis = " ".join([self.get_card_emoji(c) for c in self.d_hand])
-             p_val_str = f"{p_val} 🔥" if p_val == 21 else f"{p_val}"
-             p_emojis = " ".join([self.get_card_emoji(c) for c in self.p_hand])
-             
-             bj_pnl = user_data.get("blackjack_pnl", 0)
-             pnl_str = f"{bj_pnl:+,}" if bj_pnl != 0 else "0"
-             win_loss_line = f"✅ 贏得 {int(self.bet * 1.25):,} 💰"
-             
-             total_games = user_data.get("blackjack_games", 1)
-             wins = user_data.get("blackjack_wins", 0)
-             win_rate = (wins / total_games * 100) if total_games > 0 else 0
-
-             embed = discord.Embed(
-                 title="🎰 21點 遊戲結算 (5-Card Charlie)",
-                 description=(
-                     f"### {msg}\n\n"
-                     f"### {win_loss_line}\n\n"
-                     f"➡️ 勝率 {win_rate:.1f}% 總場次 {total_games:,}\n\n"
-                     f"**🎰 莊家手牌：**\n# {d_val_str} {d_emojis}\n\n"
-                     f"**你的手牌：**\n# {p_val_str} {p_emojis}"
-                 ),
-                 color=color
-             )
-             embed.set_footer(text=f"下注: {self.bet:,} | 餘額: {user_data.get('coin', 0):,} | 總盈虧: {pnl_str}", icon_url=interaction.user.display_avatar.url)
-             if BLACKJACK_AVATAR_URL:
-                 embed.set_thumbnail(url=BLACKJACK_AVATAR_URL)
-             
-             # 再玩按鈕
-             retry_btn = discord.ui.Button(label=f"再玩一局 (${self.bet:,})", style=discord.ButtonStyle.blurple, emoji="🔄")
-             async def retry_callback(ri: discord.Interaction):
-                 if str(ri.user.id) != self.uid: return
-                 await self.cog.start_blackjack(ri, self.bet)
-             retry_btn.callback = retry_callback
-             self.add_item(retry_btn)
-             
-             double_bet = int(self.bet) * 2
-             double_retry_btn = discord.ui.Button(label=f"雙倍下注 (${double_bet:,})", style=discord.ButtonStyle.danger, emoji="🔥")
-             async def double_retry_callback(ri: discord.Interaction):
-                 if str(ri.user.id) != self.uid: return
-                 await self.cog.start_blackjack(ri, double_bet)
-             double_retry_btn.callback = double_retry_callback
-             self.add_item(double_retry_btn)
-
-             # All In 按鈕
-             user_balance = user_data.get('coin', 0)
-             if user_balance > 0:
-                 all_in_btn = discord.ui.Button(label=f"All In (${user_balance:,})", style=discord.ButtonStyle.danger, emoji="🤑")
-                 async def all_in_callback(ri: discord.Interaction):
-                     if str(ri.user.id) != self.uid: return
-                     # 重新獲取一次最新餘額
-                     current_stats = self.bank.add_stats(ri.guild.id, ri.user.id, coin=0)
-                     bal = current_stats['coin']
-                     if bal <= 0:
-                         return await ri.response.send_message("❌ 沒錢了還想梭哈？", ephemeral=True)
-                     
-                     # 確認視窗 View
-                     confirm_view = discord.ui.View(timeout=60)
-                     
-                     yes_btn = discord.ui.Button(label="確定梭哈！", style=discord.ButtonStyle.danger, emoji="🔥")
-                     async def yes_callback(cri: discord.Interaction):
-                         final_stats = self.bank.add_stats(cri.guild.id, cri.user.id, coin=0)
-                         final_bal = final_stats['coin']
-                         if final_bal <= 0:
-                             return await cri.response.send_message("❌ 沒錢了還想梭哈？", ephemeral=True)
-                         await self.cog.start_blackjack(cri, final_bal)
-
-                     no_btn = discord.ui.Button(label="算了", style=discord.ButtonStyle.secondary, emoji="🌚")
-                     async def no_callback(cri: discord.Interaction):
-                         await cri.response.edit_message(content="已取消梭哈。", view=None)
-
-                     yes_btn.callback = yes_callback
-                     no_btn.callback = no_callback
-                     confirm_view.add_item(yes_btn)
-                     confirm_view.add_item(no_btn)
-
-                     await ri.response.send_message(
-                         f"⚠️ **高風險警示** ⚠️\n你確定要將目前所有財產 **${bal:,}** 全部投入下一局嗎？\n輸了就會變成 **$0** 喔！",
-                         view=confirm_view,
-                         ephemeral=True
-                     )
-
-                 all_in_btn.callback = all_in_callback
-                 self.add_item(all_in_btn)
-
-             await interaction.response.edit_message(embed=embed, view=self)
-             return
-
-        # 2. 正常爆牌檢查
-        if p_val > 21:
-            await self.finish_game(interaction, "💥 你爆牌了！莊家獲勝。", discord.Color.red(), 'loss')
-        else:
-            await self.update_display(interaction)
-
-    @discord.ui.button(label="結束", style=discord.ButtonStyle.danger)
-    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != self.uid:
-            return await interaction.response.send_message("這不是你的牌局！", ephemeral=True)
-
-        d_val = self.calc(self.d_hand)
-        while d_val < 17:
-            card = self.get_controlled_card('dealer', for_dealer=True)
-            self.d_hand.append(card)
-            d_val = self.calc(self.d_hand)
-
-        p_val = self.calc(self.p_hand)
-        if d_val > 21:
-            msg, res_type, color = "🎊 莊家爆牌！你贏了！", 'win', discord.Color.green()
-        elif p_val > d_val:
-            msg, res_type, color = f"🎉 你以 {p_val} 點擊敗莊家 {d_val} 點！", 'win', discord.Color.green()
-        elif p_val < d_val:
-            msg, res_type, color = f"👻 莊家 {d_val} 點勝出，你輸了。", 'loss', discord.Color.red()
-        else:
-            msg, res_type, color = "🤝 雙方平手，退回賭注。", 'draw', discord.Color.light_grey()
-
-        await self.finish_game(interaction, msg, color, res_type)
-
-    def _build_hand_display(self, value, cards, hide_second=True):
-        """組合手牌顯示：一級標題 # 讓點數與 emoji 變大"""
-        if hide_second and len(cards) >= 2:
-            emojis = self.get_card_emoji(cards[0]) + " " + self.get_card_emoji(None, use_card_back=True)
-        else:
-            emojis = " ".join([self.get_card_emoji(c) for c in cards])
-        val_str = f"{value} 🔥" if value == 21 else f"{value}"
-        return f"# {val_str} {emojis}"
-
-    async def update_display(self, interaction):
-        """更新遊戲畫面（米米警察風格），手牌放 description 讓 # 標題能正確放大"""
-        embed = discord.Embed(title="🕐 21點遊戲進行中", color=0x3498db)
-
-        # 莊家 (只顯示第一張，第二張用卡背) + 玩家，全部放 description 讓 # 一級標題能放大
-        d_val = self.calc([self.d_hand[0]])
-        d_display = self._build_hand_display(d_val, self.d_hand, hide_second=True)
-        p_val = self.calc(self.p_hand)
-        p_display = self._build_hand_display(p_val, self.p_hand, hide_second=False)
-        embed.description = f"**莊家手牌：**\n{d_display}\n\n**你的手牌：**\n{p_display}"
-
-        # 底部財務資訊（含總盈虧）
-        self.bank.users = self.bank.load_data()
-        user_data = self.bank.add_stats(int(self.gid), int(self.uid), coin=0)
-        bj_pnl = user_data.get("blackjack_pnl", 0)
-        pnl_str = f"{bj_pnl:+,}" if bj_pnl != 0 else "0"
-        embed.set_footer(text=f"下注: {self.bet:,} | 餘額: {user_data.get('coin', 0):,} | 總盈虧: {pnl_str}", icon_url=interaction.user.display_avatar.url)
-        if BLACKJACK_AVATAR_URL:
-            embed.set_thumbnail(url=BLACKJACK_AVATAR_URL)
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def finish_game(self, interaction, result_text, color, result_type):
-        """結算畫面，顯示雙方所有手牌，並更新總盈虧"""
-        self.clear_items()
-
-        self.bank.users = self.bank.load_data()
-
-        payout = 0
-        res = str(result_type).strip().lower()
-        if res == 'win': payout = int(self.bet) * 2
-        elif res == 'draw': payout = int(self.bet)
-
-        user_data = self.bank.add_stats(self.gid, self.uid, coin=payout)
-
-        # 追蹤 21 點總盈虧、勝場、總場次
-        pnl_delta = 0
-        if res == 'win':
-            pnl_delta = int(self.bet)
-            user_data["blackjack_wins"] = user_data.get("blackjack_wins", 0) + 1
-        elif res == 'loss':
-            pnl_delta = -int(self.bet)
-        user_data["blackjack_pnl"] = user_data.get("blackjack_pnl", 0) + pnl_delta
-        user_data["blackjack_games"] = user_data.get("blackjack_games", 0) + 1
-        self.bank.save_data()
-
-        d_val = self.calc(self.d_hand)
-        d_val_str = f"{d_val} 🔥" if d_val == 21 else f"{d_val}"
-        d_emojis = " ".join([self.get_card_emoji(c) for c in self.d_hand])
-        p_val = self.calc(self.p_hand)
-        p_val_str = f"{p_val} 🔥" if p_val == 21 else f"{p_val}"
-        p_emojis = " ".join([self.get_card_emoji(c) for c in self.p_hand])
-
-        # 贏得/損失 醒目顯示（最重要）
-        win_loss_line = ""
-        if res == 'win':
-            win_loss_line = f"✅ 贏得 {int(self.bet):,} 💰"
-        elif res == 'loss':
-            win_loss_line = f"❌ 損失 {int(self.bet):,} 💰"
-        else:
-            win_loss_line = "🤝 平手 退回賭注"
-
-        # 勝率與總場次
-        total_games = user_data.get("blackjack_games", 1)
-        wins = user_data.get("blackjack_wins", 0)
-        win_rate = (wins / total_games * 100) if total_games > 0 else 0
-        stats_line = f"➡️ 勝率 {win_rate:.1f}% 總場次 {total_games}"
-
-        bj_pnl = user_data.get("blackjack_pnl", 0)
-        pnl_str = f"{bj_pnl:+,}" if bj_pnl != 0 else "0"
-
-        # 結算介面：結果標題 → 贏得/損失 → 勝率 → 手牌 → 底部財務
-        embed = discord.Embed(
-            title="🎰 21點 遊戲結算",
-            description=(
-                f"### {result_text}\n\n"
-                f"### {win_loss_line}\n\n"
-                f"{stats_line}\n\n"
-                f"**🎰 莊家手牌：**\n# {d_val_str} {d_emojis}\n\n"
-                f"**你的手牌：**\n# {p_val_str} {p_emojis}"
-            ),
-            color=color
-        )
-        embed.set_footer(text=f"下注: {self.bet:,} | 餘額: {user_data['coin']:,} | 總盈虧: {pnl_str}", icon_url=interaction.user.display_avatar.url)
-        if BLACKJACK_AVATAR_URL:
-            embed.set_thumbnail(url=BLACKJACK_AVATAR_URL)
-
-        # 再玩一局按鈕
-        retry_btn = discord.ui.Button(label=f"再玩一局 (${self.bet:,})", style=discord.ButtonStyle.blurple, emoji="🔄")
-        async def retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != self.uid: return
-            await self.cog.start_blackjack(ri, self.bet)
-        retry_btn.callback = retry_callback
-        self.add_item(retry_btn)
-
-        double_bet = int(self.bet) * 2
-        double_retry_btn = discord.ui.Button(label=f"雙倍下注 (${double_bet:,})", style=discord.ButtonStyle.danger, emoji="🔥")
-
-        async def double_retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != self.uid: return
-            # 這裡直接呼叫 start_blackjack 並傳入兩倍的賭金
-            await self.cog.start_blackjack(ri, double_bet)
-
-        double_retry_btn.callback = double_retry_callback
-        self.add_item(double_retry_btn)
-
-        # All In 按鈕
-        user_balance = user_data.get('coin', 0)
-        if user_balance > 0:
-            all_in_btn = discord.ui.Button(label=f"All In (${user_balance:,})", style=discord.ButtonStyle.danger, emoji="🤑")
-            async def all_in_callback(ri: discord.Interaction):
-                if str(ri.user.id) != self.uid: return
-                # 重新獲取一次最新餘額
-                current_stats = self.bank.add_stats(ri.guild.id, ri.user.id, coin=0)
-                bal = current_stats['coin']
-                if bal <= 0:
-                    return await ri.response.send_message("❌ 沒錢了還想梭哈？", ephemeral=True)
-                
-                # 確認視窗 View
-                confirm_view = discord.ui.View(timeout=60)
-                
-                yes_btn = discord.ui.Button(label="確定梭哈！", style=discord.ButtonStyle.danger, emoji="🔥")
-                async def yes_callback(cri: discord.Interaction):
-                    final_stats = self.bank.add_stats(cri.guild.id, cri.user.id, coin=0)
-                    final_bal = final_stats['coin']
-                    if final_bal <= 0:
-                        return await cri.response.send_message("❌ 沒錢了還想梭哈？", ephemeral=True)
-                    await self.cog.start_blackjack(cri, final_bal)
-
-                no_btn = discord.ui.Button(label="算了", style=discord.ButtonStyle.secondary, emoji="🌚")
-                async def no_callback(cri: discord.Interaction):
-                    await cri.response.edit_message(content="已取消梭哈。", view=None)
-
-                yes_btn.callback = yes_callback
-                no_btn.callback = no_callback
-                confirm_view.add_item(yes_btn)
-                confirm_view.add_item(no_btn)
-
-                await ri.response.send_message(
-                    f"⚠️ **高風險警示** ⚠️\n你確定要將目前所有財產 **${bal:,}** 全部投入下一局嗎？\n輸了就會變成 **$0** 喔！",
-                    view=confirm_view,
-                    ephemeral=True
-                )
-
-            all_in_btn.callback = all_in_callback
-            self.add_item(all_in_btn)
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        try:
-            await self.main_interaction.edit_original_response(view=self)
-        except:
-            pass
-
-class DragonGateView(discord.ui.View):
-    def __init__(self, interaction, user_data, bet, deck, cog, bank):
-        super().__init__(timeout=60)
-        self.interaction = interaction
-        self.user_data = user_data
-        self.bet = bet
-        self.deck = deck
-        self.cog = cog
-        self.bank = bank
-        self.gate = sorted([self.deck.pop(), self.deck.pop()], key=lambda x: x[1])
-        self.is_pair = self.gate[0][1] == self.gate[1][1]
-
-    def card_to_str(self, card):
-            suit, val = card
-            names = {1: "A", 11: "J", 12: "Q", 13: "K"}
-            return f"{suit}{names.get(val, val)}"
-
-    async def _start_new_round(self, interaction: discord.Interaction, bet: int):
-        user_data = self.bank.add_stats(interaction.guild.id, interaction.user.id, coin=0)
-        if user_data.get("coin", 0) < bet:
-            return await interaction.response.send_message(
-                f"❌ 餘額不足，開新局需要 `${bet:,}`，你目前只有 `${user_data.get('coin', 0):,}`。",
-                ephemeral=True
-            )
-
-        self.bank.add_stats(interaction.guild.id, interaction.user.id, coin=-bet)
-        self.bank.save_data()
-        user_data = self.bank.add_stats(interaction.guild.id, interaction.user.id, coin=0)
-
-        suits = ["♠️", "♥️", "♦️", "♣️"]
-        deck = [(s, v) for s in suits for v in range(1, 14)]
-        random.shuffle(deck)
-        view = DragonGateView(interaction, user_data, bet, deck, self.cog, self.bank)
-
-        embed = discord.Embed(title="🐉 射龍門 (Shoot the Dragon Gate)", color=0xf1c40f)
-        embed.add_field(name="⚖️ 目前門柱", value=f"{view.card_to_str(view.gate[0])}  ↔️  {view.card_to_str(view.gate[1])}", inline=False)
-        embed.add_field(name="💰 下注金額", value=f"`${bet:,}` (已扣除)", inline=True)
-        embed.set_footer(text="提示：撞柱賠兩倍！")
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
-
-    @discord.ui.button(label="射門！ (Shoot)", style=discord.ButtonStyle.green)
-    async def shoot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if str(interaction.user.id) != str(self.interaction.user.id):
-            return await interaction.response.send_message("這不是你的賭局！", ephemeral=True)
-
-        shoot_card = self.deck.pop()
-        p1, p2 = self.gate[0][1], self.gate[1][1]
-        val = shoot_card[1]
-
-        # 邏輯判斷
-        result = ""
-        pnl = 0
-        coin_delta = 0
-        if val == p1 or val == p2:
-            result = f"😱 **撞柱了！！** 賠兩倍！"
-            pnl = -self.bet * 2
-            coin_delta = -self.bet
-        elif p1 < val < p2:
-            result = f"🎊 **射中了！** 恭喜贏得獎金！"
-            pnl = self.bet
-            coin_delta = self.bet * 2
-        else:
-            result = f"💨 **射偏了...** 賭金沒收。"
-            pnl = -self.bet
-            coin_delta = 0
-
-        await self.finish_game(interaction, shoot_card, result, pnl, coin_delta)
-
-    @discord.ui.button(label="不射 (Fold)", style=discord.ButtonStyle.gray)
-    async def fold(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 折損一半賭金
-        loss = self.bet // 2
-        refund = self.bet - loss
-        self.user_data["coin"] += refund
-        self.bank.save_data()
-
-        # 再來一局按鈕
-        retry_btn = discord.ui.Button(label=f"再來一局 (${self.bet:,})", style=discord.ButtonStyle.blurple, emoji="🔄")
-        async def retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != str(self.interaction.user.id): return
-            await self._start_new_round(ri, self.bet)
-        retry_btn.callback = retry_callback
-
-        # 雙倍下注按鈕
-        double_bet = int(self.bet) * 2
-        double_retry_btn = discord.ui.Button(label=f"雙倍下注 (${double_bet:,})", style=discord.ButtonStyle.danger, emoji="🔥")
-        async def double_retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != str(self.interaction.user.id): return
-            await self._start_new_round(ri, double_bet)
-        double_retry_btn.callback = double_retry_callback
-
-        retry_view = discord.ui.View()
-        retry_view.add_item(retry_btn)
-        retry_view.add_item(double_retry_btn)
-
-        await interaction.response.edit_message(content=f"🏳️ 你退縮了，損失一半賭金 (${loss:,})。", embed=None, view=retry_view)
-
-    async def finish_game(self, interaction, shoot_card, result, pnl, coin_delta):
-        self.user_data["coin"] += coin_delta
-        self.bank.save_data()
-
-        embed = discord.Embed(title="🐉 射龍門結果", color=0x00ff00 if pnl > 0 else 0xff0000)
-        embed.add_field(name="門柱", value=f"{self.card_to_str(self.gate[0])}  ↔️  {self.card_to_str(self.gate[1])}", inline=False)
-        embed.add_field(name="你的牌", value=f"🎯 **{self.card_to_str(shoot_card)}**", inline=False)
-        embed.description = f"### {result}\n你的損益: `{pnl:+,}`\n目前餘額: `${self.user_data['coin']:,}`"
-
-        # 再來一局按鈕
-        retry_btn = discord.ui.Button(label=f"再來一局 (${self.bet:,})", style=discord.ButtonStyle.blurple, emoji="🔄")
-        async def retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != str(self.interaction.user.id): return
-            await self._start_new_round(ri, self.bet)
-        retry_btn.callback = retry_callback
-
-        # 雙倍下注按鈕
-        double_bet = int(self.bet) * 2
-        double_retry_btn = discord.ui.Button(label=f"雙倍下注 (${double_bet:,})", style=discord.ButtonStyle.danger, emoji="🔥")
-        async def double_retry_callback(ri: discord.Interaction):
-            if str(ri.user.id) != str(self.interaction.user.id): return
-            await self._start_new_round(ri, double_bet)
-        double_retry_btn.callback = double_retry_callback
-
-        retry_view = discord.ui.View()
-        retry_view.add_item(retry_btn)
-        retry_view.add_item(double_retry_btn)
-
-        await interaction.response.edit_message(embed=embed, view=retry_view)
-
-# 隱藏訊息
-class SecretModal(discord.ui.Modal, title='發布訊息'):
-    # 設定輸入框
-    secret_text = discord.ui.TextInput(
-        label='內容',
-        style=discord.TextStyle.paragraph,
-        placeholder='在此輸入內容...',
-        required=True
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        # 引用你原本定義好的 SecretView
-        view = SecretView(self.secret_text.value)
-        embed = discord.Embed(
-            title="隱藏訊息發好囉",
-            description="點擊下方按鈕解鎖內容",
-            color=0x2b2d31
-        )
-        embed.set_footer(text=f"由 {interaction.user.display_name} 發布")
-        await interaction.response.send_message(embed=embed, view=view)
-
-# 修改後的 SecretView
-class SecretView(discord.ui.View):
-    def __init__(self, secret_content):
-        super().__init__(timeout=None)
-        self.content = secret_content
-
-    @discord.ui.button(label="Unlock", style=discord.ButtonStyle.secondary)
-    async def unlock(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 點擊時才讀取檔案，實現即時顯示
-        allowed_ids = load_allowed_users()
-        if str(interaction.user.id) in allowed_ids:
-            await interaction.response.send_message(f"{self.content}", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 你的 ID 不在授權名單中。", ephemeral=True)
-
-# 音樂 UI
-class ProMusicView(discord.ui.View):
-    def __init__(self, voice_client, filename):
-        super().__init__(timeout=None)
-        self.vc = voice_client
-        self.filename = filename
-
-    @discord.ui.button(label="上一首", style=discord.ButtonStyle.secondary, row=0)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("目前僅播放單一本地檔案。", ephemeral=True)
-
-    @discord.ui.button(label="暫停/恢復", style=discord.ButtonStyle.primary, row=0)
-    async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.vc.is_playing():
-            self.vc.pause()
-            await interaction.response.send_message("⏸️ 已暫停播放", ephemeral=True)
-        elif self.vc.is_paused():
-            self.vc.resume()
-            await interaction.response.send_message("▶️ 已恢復播放", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 目前沒在播放", ephemeral=True)
-
-    @discord.ui.button(label="下一首", style=discord.ButtonStyle.success, row=0)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("後面沒有歌囉！", ephemeral=True)
-
-    @discord.ui.button(label="循環：關閉", style=discord.ButtonStyle.secondary, row=0)
-    async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("單曲循環功能開發中。", ephemeral=True)
-
-    @discord.ui.button(label="查看列表", style=discord.ButtonStyle.secondary, row=1)
-    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"📋 目前播放清單：\n1. {self.filename}", ephemeral=True)
-
-
-    import yt_dlp
-
-# 天氣 UI
-class WeatherView(discord.ui.View):
-    def __init__(self, forecast_data, city_name, cwa_url):
-        super().__init__(timeout=60)
-        self.forecast_data = forecast_data
-        self.city_name = city_name
-        self.cwa_url = cwa_url
-
-        # 修正處：在這裡直接把 Link Button 加進去，確保它一定有 URL
-        self.add_item(discord.ui.Button(
-            label="7日報導 (CWA)",
-            url=self.cwa_url,
-            style=discord.ButtonStyle.link,
-            emoji="📅"
-        ))
-
-    def create_weather_embed(self, day_index):
-        # Forecast 每 3 小時一筆，+8 筆大約是 24 小時後
-        data = self.forecast_data['list'][day_index * 8]
-        dt_txt = data['dt_txt']
-        temp = round(data['main']['temp'])
-        feel = round(data['main']['feels_like'])
-        desc = data['weather'][0]['description']
-        hum = data['main']['humidity']
-        icon = data['weather'][0]['icon']
-
-        day_label = "今日" if day_index == 0 else "明日"
-
-        embed = discord.Embed(
-            title=f"🌤️ {self.city_name} {day_label}天氣預報",
-            description=f"**預測狀況**：{desc}\n預報時間：`{dt_txt}`",
-            color=0x3498db if day_index == 0 else 0xe67e22,
-            url=self.cwa_url,
-            timestamp=datetime.now()
-        )
-        embed.set_thumbnail(url=f"http://openweathermap.org/img/wn/{icon}@2x.png")
-        embed.add_field(name="🌡️ 溫度 / 體感", value=f"`{temp}°C` / `{feel}°C`", inline=True)
-        embed.add_field(name="💧 濕度", value=f"`{hum}%`", inline=True)
-
-        # 取得該時段的最高/最低 (注意：這是該 3 小時區間的)
-        temp_max = round(data['main']['temp_max'])
-        temp_min = round(data['main']['temp_min'])
-        embed.add_field(name="📊 預計區間", value=f"最高 `{temp_max}°C` | 最低 `{temp_min}°C`", inline=False)
-        embed.set_footer(text="點擊下方按鈕切換日期")
-        return embed
-
-    @discord.ui.button(label="今日天氣", style=discord.ButtonStyle.primary, emoji="🏠")
-    async def today_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = self.create_weather_embed(0)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="明天天氣", style=discord.ButtonStyle.success, emoji="⏭️")
-    async def tomorrow_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = self.create_weather_embed(1)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-# 播放音樂 UI
-class YTMusicView(discord.ui.View):
-    def __init__(self, voice_client, info, queue, cog):
-        super().__init__(timeout=None)
-        self.vc = voice_client
-        self.info = info
-        self.queue = queue
-        self.cog = cog
-
-    @discord.ui.button(label="暫停/恢復", style=discord.ButtonStyle.primary, row=0)
-    async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.vc.is_playing():
-            self.vc.pause()
-            await interaction.response.send_message("⏸️ 已暫停", ephemeral=True)
-        elif self.vc.is_paused():
-            self.vc.resume()
-            await interaction.response.send_message("▶️ 已恢復", ephemeral=True)
-
-    @discord.ui.button(label="下一首", style=discord.ButtonStyle.success, row=0)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.vc:
-            self.vc.stop() # 停止當前歌曲會自動觸發 play_next 播放下一首
-            await interaction.response.send_message("⏭️ 跳過當前歌曲", ephemeral=True)
-
-    @discord.ui.button(label="查看列表", style=discord.ButtonStyle.secondary, row=1)
-    async def list_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.queue:
-            return await interaction.response.send_message("📋 目前待播放清單是空的。", ephemeral=True)
-
-        queue_text = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(self.queue[:10])])
-        await interaction.response.send_message(f"📋 **待播放清單 (前10首)：**\n{queue_text}", ephemeral=True)
-
-# 搶銀行 UI（主持人按確認才開始，無倒數）
-class RobBankView(discord.ui.View):
-    def __init__(self, interaction, cog_instance, cost):
-        super().__init__(timeout=300)
-        self.interaction = interaction
-        self.cog = cog_instance
-        self.cost = cost
-        self.participants = [interaction.user]
-
-    @discord.ui.button(label="加入", style=discord.ButtonStyle.danger)
-    async def join_rob(self, interaction: discord.Interaction, button: discord.ui.Button):
-        uid = interaction.user.id
-
-        if uid in self.cog.active_robbers:
-            return await interaction.response.send_message("❌ 你已經在行動中，不能重複參加！", ephemeral=True)
-
-        if interaction.user in self.participants:
-            return await interaction.response.send_message("你已經在隊伍中了！", ephemeral=True)
-
-        bank = self.cog.bot.get_cog('BankMod')
-        user_data = bank.add_stats(interaction.guild.id, uid, coin=0)
-        if user_data['coin'] < self.cost:
-            return await interaction.response.send_message(f"❌ 錢不夠支付準備金 {self.cost:,}！", ephemeral=True)
-
-        self.participants.append(interaction.user)
-        self.cog.active_robbers.add(uid)
-
-        if interaction.message and len(interaction.message.embeds) > 0:
-            embed = interaction.message.embeds[0]
-            participant_list = "\n".join([f"• {p.display_name}" for p in self.participants])
-            embed.description = (
-                f"**發起人：** {self.interaction.user.mention}\n"
-                f"**準備金：** `${self.cost:,}`\n\n"
-                f"👥 **已加入成員 ({len(self.participants)} 人)：**\n{participant_list}\n\n"
-                "📋 **主持人確認人數後按「確認開始」按鈕**"
-            )
-            await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="確認開始", style=discord.ButtonStyle.green)
-    async def confirm_start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction.user.id:
-            return await interaction.response.send_message("❌ 只有發起人（主持人）可以確認開始！", ephemeral=True)
-
-        for item in self.children:
-            item.disabled = True
-        if interaction.message and len(interaction.message.embeds) > 0:
-            embed = interaction.message.embeds[0]
-            participant_list = "\n".join([f"• {p.display_name}" for p in self.participants])
-            embed.description = (
-                f"**發起人：** {self.interaction.user.mention}\n"
-                f"**準備金：** `${self.cost:,}`\n\n"
-                f"👥 **已加入成員 ({len(self.participants)} 人)：**\n{participant_list}\n\n"
-                "🚀 **行動開始中...**"
-            )
-            await interaction.response.edit_message(embed=embed, view=self)
-        else:
-            await interaction.response.defer()
-        await self.cog.start_robbery_logic(self.interaction, self.participants)
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        try:
-            await self.interaction.edit_original_response(view=self)
-        except:
-            pass
-
-# 轉帳 UI
 class TransferView(discord.ui.View):
     def __init__(self, bot, sender, receiver, amount, fee, total, bank_cog):
         super().__init__(timeout=30)
@@ -2934,6 +1988,95 @@ class MyCommands(commands.Cog):
             print("🔓 搶案流程結束，已釋放所有參與者狀態。")
 
     # 存入金庫
+
+    @app_commands.command(name="redpacket", description="發送紅包")
+    @app_commands.describe(total="總金額", count="總共幾包(3-11包)")
+    @app_commands.guild_only()
+    async def redpacket(self, interaction: discord.Interaction, total: int, count: int):
+        if count < 3 or count > 11:
+            await interaction.response.send_message("紅包數量必須在 3 到 11 包之間！", ephemeral=True)
+            return
+            
+        if total < count * 50:
+            await interaction.response.send_message(f"金額太小啦！發 {count} 包至少需要 {count * 50} 💰！", ephemeral=True)
+            return
+
+        bank = getattr(self.bot, "get_cog", lambda x: None)('BankMod')
+        if not bank:
+            await interaction.response.send_message("銀行系統發生錯誤，無法存取！", ephemeral=True)
+            return
+
+        gid = str(interaction.guild.id)
+        uid = str(interaction.user.id)
+        
+        if gid not in bank.users or uid not in bank.users[gid]:
+            await interaction.response.send_message("你的銀行帳戶未建立！請先賺點錢吧。", ephemeral=True)
+            return
+            
+        balance = bank.users[gid][uid].get('coin', 0)
+            
+        if balance < total:
+            await interaction.response.send_message(f"你的現金（{balance} 💰）不夠發 {total} 的紅包哦！", ephemeral=True)
+            return
+            
+        # 扣除紅包總金額
+        bank.users[gid][uid]['coin'] -= total
+        bank.save_data()
+
+        # 生成紅包列
+        packets = [0] * count
+        
+        # 獨拿 51% (資本家)
+        big_amt = int(total * 0.51)
+        
+        # 只拿 1.5%~2% (窮光蛋)
+        small_pct = random.uniform(0.015, 0.02)
+        small_amt = max(1, int(total * small_pct))
+        
+        # 剩下的至少 5%
+        min_rest_amt = int(total * 0.05)
+        
+        indices = list(range(count))
+        random.shuffle(indices)
+        
+        packets[indices[0]] = big_amt
+        packets[indices[1]] = small_amt
+        
+        rest_indices = indices[2:]
+        for idx in rest_indices:
+            packets[idx] = min_rest_amt
+            
+        remaining_total = total - sum(packets)
+        
+        if remaining_total > 0 and rest_indices:
+            # 將剩餘的金額隨機切割
+            cuts = [random.random() for _ in rest_indices]
+            total_cuts = sum(cuts)
+            bonus = [int(remaining_total * (c / total_cuts)) for c in cuts]
+            
+            for i, idx in enumerate(rest_indices):
+                packets[idx] += bonus[i]
+                
+            # 將因強制整數導致的殘餘差異全部加進最後一份
+            diff = total - sum(packets)
+            packets[rest_indices[-1]] += diff
+            
+        random.shuffle(packets)
+
+        # 這裡會使用稍早引入的 RedPacketView
+        view = RedPacketView(self.bot, interaction.user, packets, total)
+        embed = discord.Embed(
+            title=f"🧧 {interaction.user.display_name} 發了一個大紅包！",
+            description=f"總金額: `{total}` 💰\n剩餘金額: `{total}` 💰\n數量: `{count}` 包\n\n手刀點擊下方紅包領取！",
+            color=0xff0000
+        )
+        
+        await interaction.response.send_message(embed=embed, view=view)
+        try:
+            view.message = await interaction.original_response()
+        except:
+            pass
+
     @app_commands.command(name="deposit", description="將身上的現金存入金庫")
     @app_commands.guild_only()
     async def deposit(self, interaction: discord.Interaction, amount: int):

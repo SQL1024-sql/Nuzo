@@ -89,7 +89,7 @@
             "blackjack_games": 3
         },
         "763033832227078176": {
-            "coin": 61883040,
+            "coin": 184230932,
             "exp": 28,
             "level": 10,
             "stocks": {
@@ -102,9 +102,9 @@
             "loan": 200000,
             "boat_level": 20,
             "rod_level": 20,
-            "blackjack_pnl": 263788914,
-            "blackjack_games": 540,
-            "blackjack_wins": 244
+            "blackjack_pnl": 92963551,
+            "blackjack_games": 549,
+            "blackjack_wins": 249
         },
         "868361854748074065": {
             "coin": 5289020,
@@ -119,39 +119,39 @@
             "last_hourly_slot": 1772355600
         },
         "1096014500668375090": {
-            "coin": 196347639,
+            "coin": 753710113,
             "exp": 0,
             "level": 4,
             "stocks": {},
             "last_hourly": 1771077623.632544,
-            "last_checkin": "2026-03-08",
-            "last_hourly_slot": 1772899200,
+            "last_checkin": "2026-03-11",
+            "last_hourly_slot": 1773194400,
             "bank_balance": 0,
             "loan": 200000,
             "boat_level": 20,
             "rod_level": 20,
-            "blackjack_pnl": 14535009,
-            "blackjack_games": 685,
-            "blackjack_wins": 296
+            "blackjack_pnl": 48255009,
+            "blackjack_games": 717,
+            "blackjack_wins": 308
         },
         "1234077475173306439": {
-            "coin": 355890620,
+            "coin": 1043550154,
             "exp": 405,
             "level": 6,
             "stocks": {},
-            "last_checkin": "2026-03-08",
+            "last_checkin": "2026-03-11",
             "last_hourly": 1771127471.376333,
             "last_hourly_slot": 1772899200,
             "loan": 0,
             "bank_balance": 3900000,
             "boat_level": 20,
             "rod_level": 20,
-            "blackjack_wins": 442,
-            "blackjack_pnl": 6670268,
-            "blackjack_games": 977
+            "blackjack_wins": 474,
+            "blackjack_pnl": 226670268,
+            "blackjack_games": 1044
         },
         "665170783181733898": {
-            "coin": 114374599,
+            "coin": 191853878,
             "exp": 60,
             "level": 4,
             "stocks": {},
@@ -162,41 +162,41 @@
             "loan": 0,
             "boat_level": 20,
             "rod_level": 20,
-            "blackjack_pnl": 128619165,
-            "blackjack_games": 184,
-            "blackjack_wins": 78
+            "blackjack_pnl": 129619165,
+            "blackjack_games": 187,
+            "blackjack_wins": 79
         },
         "1358396241440149675": {
-            "coin": 9020963,
+            "coin": 147778768,
             "exp": 240,
             "level": 3,
             "stocks": {},
             "last_hourly": 1771128539.544994,
-            "last_checkin": "2026-03-05",
-            "last_hourly_slot": 1772899200,
+            "last_checkin": "2026-03-11",
+            "last_hourly_slot": 1773190800,
             "loan": 0,
-            "boat_level": 14,
-            "rod_level": 12,
-            "blackjack_wins": 83,
-            "blackjack_pnl": -400000,
-            "blackjack_games": 192
+            "boat_level": 20,
+            "rod_level": 20,
+            "blackjack_wins": 87,
+            "blackjack_pnl": 11100000,
+            "blackjack_games": 198
         },
         "854266115705667585": {
-            "coin": 511018,
+            "coin": 3826794,
             "exp": 98,
             "level": 1,
             "stocks": {},
-            "boat_level": 4,
+            "boat_level": 5,
             "rod_level": 5,
             "loan": 0,
             "last_hourly_slot": 1772899200,
-            "last_checkin": "2026-03-08",
+            "last_checkin": "2026-03-11",
             "blackjack_wins": 1,
-            "blackjack_pnl": 2184652,
-            "blackjack_games": 1
+            "blackjack_pnl": -61799712,
+            "blackjack_games": 2
         },
         "1321061361584832578": {
-            "coin": 8854776,
+            "coin": 9769733,
             "exp": 108,
             "level": 2,
             "stocks": {},
@@ -206,8 +206,8 @@
             "blackjack_pnl": -1200,
             "blackjack_games": 4,
             "bank_balance": 10000,
-            "last_hourly_slot": 1772730000,
-            "last_checkin": "2026-03-08"
+            "last_hourly_slot": 1773147600,
+            "last_checkin": "2026-03-11"
         },
         "1139040215189696513": {
             "coin": 1070,
