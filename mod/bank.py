@@ -44,6 +44,7 @@ class BankMod(commands.Cog):
                 "exp": 0,
                 "stocks": {},
                 "bank_balance": 0,
+                "fixed_deposits": [],
                 "loan": 0,
                 "boat_level": 1,
                 "rod_level": 1
@@ -54,6 +55,8 @@ class BankMod(commands.Cog):
             self.users[gid][uid]["stocks"] = {}
         if "loan" not in self.users[gid][uid]:
             self.users[gid][uid]["loan"] = 0
+        if "fixed_deposits" not in self.users[gid][uid] or not isinstance(self.users[gid][uid].get("fixed_deposits"), list):
+            self.users[gid][uid]["fixed_deposits"] = []
         self.users[gid][uid]["coin"] += coin
         self.users[gid][uid]["exp"] += exp
         return self.users[gid][uid]
@@ -72,7 +75,7 @@ class BankMod(commands.Cog):
         # 使用 .get(..., 0) 防止 KeyError
         sorted_users = sorted(
             server_users.items(),
-            key=lambda x: x[1].get('coin', 0) + x[1].get('bank_balance', 0),
+            key=lambda x: x[1].get('coin', 0) + x[1].get('bank_balance', 0) + sum(int(fd.get('principal', 0)) for fd in x[1].get('fixed_deposits', [])),
             reverse=True
         )[:5]
 
@@ -88,12 +91,13 @@ class BankMod(commands.Cog):
             # 取得各項數值
             cash = data.get('coin', 0)
             bank_amt = data.get('bank_balance', 0)
-            total = cash + bank_amt
+            fd_principal = sum(int(fd.get('principal', 0)) for fd in data.get('fixed_deposits', []))
+            total = cash + bank_amt + fd_principal
 
             # 格式化顯示：顯示總額，並在括號內標註現金與存款
             embed.add_field(
                 name=f"{i}. {name}",
-                value=f"💎 **總資產：`${total:,}`**\n └ 💵 現金：`${cash:,}`\n └ 🏦 金庫：`${bank_amt:,}`",
+                value=f"💎 **總資產：`${total:,}`**\n └ 💵 現金：`${cash:,}`\n └ 🏦 金庫：`${bank_amt:,}`\n └ 📦 定存本金：`${fd_principal:,}`",
                 inline=False
             )
 
@@ -107,10 +111,12 @@ class BankMod(commands.Cog):
         # 使用 .get(key, default) 確保找不到欄位時不會報錯，而是顯示 0
         cash = user_data.get('coin', 0)
         bank = user_data.get('bank_balance', 0)
+        fd_principal = sum(int(fd.get('principal', 0)) for fd in user_data.get('fixed_deposits', []))
         loan = user_data.get('loan', 0)
         embed = discord.Embed(title="💰 帳戶餘額查詢", color=0xf1c40f)
         embed.add_field(name="💵 持有現金", value=f"`${cash:,}`", inline=False)
         embed.add_field(name="🏦 金庫存款", value=f"`${bank:,}`", inline=False)
+        embed.add_field(name="📦 定存本金", value=f"`${fd_principal:,}`", inline=False)
         embed.add_field(name="🏧 債務金額", value=f"`${loan:,}`", inline=False)
         embed.set_footer(text=f"查詢對象：{interaction.user.display_name}")
 

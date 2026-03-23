@@ -13,7 +13,10 @@ if sys.platform == "win32":
     os.system('color')
 
 # --- [基礎設定] ---
-GUILD_ID = 1446838276249096228
+GUILD_IDS = [
+    1446838276249096228,
+    861274546077171752,
+]
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -22,6 +25,7 @@ class MyBot(commands.Bot):
             intents=discord.Intents.all()
         )
         self.extensions_list = ['mod.Mod', 'mod.bank']
+        self.guild_ids = GUILD_IDS
 
         # --- [⚙️ Neuro-sama 核心人設與參數設定] ---
         # 在這裡修改英文提示詞，可以控制她不要每句都嗆人
@@ -82,10 +86,15 @@ class MyBot(commands.Bot):
 
         # 同步斜線指令
         try:
-            # 將全部的廣域指令(Global)複製到特定的伺服器然後同步，這樣既不會有重複，也能立刻生效
-            self.tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
-            await self.tree.sync(guild=discord.Object(id=GUILD_ID))
-            print(f"✅ 指令已同步至伺服器: {GUILD_ID}")
+            if not self.guild_ids:
+                await self.tree.sync()
+                print("✅ 指令已全域同步")
+            else:
+                for gid in self.guild_ids:
+                    guild_obj = discord.Object(id=int(gid))
+                    self.tree.copy_global_to(guild=guild_obj)
+                    synced = await self.tree.sync(guild=guild_obj)
+                    print(f"✅ 指令已同步至伺服器: {gid} | synced={len(synced)}")
         except Exception as e:
             print(f"⚠️ 同步失敗: {e}")
 

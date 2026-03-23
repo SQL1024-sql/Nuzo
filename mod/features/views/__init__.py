@@ -1,5 +1,5 @@
 from .admin_views import RobBankView, SecretModal, SecretView, load_allowed_users, save_allowed_users
-from .fishing_views import FishActiveView, FishCancelConfirmView, FishConfirmView, FishingView
+from .fishing_views import FishActiveView, FishCancelConfirmView, FishConfirmView, FishingView, FishingHubView
 from .game_views import BLACKJACK_AVATAR_URL, BlackjackView, DragonGateView, RedPacketView
 
 __all__ = [
@@ -7,7 +7,7 @@ __all__ = [
     "BlackjackView",
     "DragonGateView",
     "RedPacketView",
-    "FishingView",
+    "FishingView, FishingHubView",
     "FishConfirmView",
     "FishActiveView",
     "FishCancelConfirmView",

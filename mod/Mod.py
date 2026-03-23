@@ -101,6 +101,7 @@ from .features.views import (
     DragonGateView,
     RedPacketView,
     FishingView,
+    FishingHubView,
     FishConfirmView,
     FishActiveView,
     FishCancelConfirmView,
@@ -164,6 +165,233 @@ class TransferView(discord.ui.View):
     @discord.ui.button(label="取消", style=discord.ButtonStyle.red)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="❌ 交易已取消。", embed=None, view=None)
+
+
+class ABGuessModal(discord.ui.Modal, title="🎯 猜答案"):
+    def __init__(self, game_view: "ABGameView"):
+        super().__init__()
+        self.game_view = game_view
+        self.guess_input = discord.ui.TextInput(
+            label=f"請輸入 {game_view.length} 位數字",
+            placeholder="例如：2486",
+            required=True,
+            min_length=game_view.length,
+            max_length=game_view.length,
+        )
+        self.add_item(self.guess_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.game_view.can_submit_guess(interaction.user):
+            return await interaction.response.send_message("❌ 這不是你的幾A幾B遊戲。", ephemeral=True)
+
+        guess = str(self.guess_input.value or "").strip()
+        error = self.game_view.validate_guess(guess)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
+        self.game_view.apply_guess(guess)
+        self.game_view.sync_buttons()
+        await interaction.response.edit_message(embed=self.game_view.build_embed(), view=self.game_view)
+
+
+class ABGameView(discord.ui.View):
+    def __init__(self, cog_instance, owner: discord.abc.User, length: int, answer: str = None, challenge_mode: bool = False, target_user: discord.abc.User = None, guild_id: int = None):
+        super().__init__(timeout=1800)
+        self.cog = cog_instance
+        self.owner = owner
+        self.owner_id = owner.id
+        self.creator = owner
+        self.creator_id = owner.id
+        self.challenge_mode = challenge_mode
+        self.target_user = target_user
+        self.target_user_id = target_user.id if target_user else None
+        self.player = target_user if challenge_mode and target_user else (None if challenge_mode else owner)
+        self.player_id = self.player.id if self.player else (None if challenge_mode else owner.id)
+        self.guild_id = guild_id
+        self.length = int(length)
+        self.answer = answer if answer is not None else self.cog._generate_ab_answer(self.length)
+        self.tries = 0
+        self.history = []
+        self.is_solved = False
+        self.settlement_applied = False
+        self.settlement_delta = 0
+        self.settlement_text = None
+        self.settlement_balance = None
+        self.sync_buttons()
+
+    def sync_buttons(self):
+        if self.is_solved:
+            if self.challenge_mode:
+                self.action_btn.label = "✅ 已完成"
+                self.action_btn.style = discord.ButtonStyle.secondary
+                self.action_btn.disabled = True
+            else:
+                self.action_btn.label = "🔁 再來一局"
+                self.action_btn.style = discord.ButtonStyle.success
+                self.action_btn.disabled = False
+        else:
+            self.action_btn.label = "🎯 猜答案"
+            self.action_btn.style = discord.ButtonStyle.primary
+            self.action_btn.disabled = False
+
+    def can_submit_guess(self, user: discord.abc.User):
+        return (self.player_id is not None) and (user.id == self.player_id)
+
+    def ensure_player(self, user: discord.abc.User):
+        if self.challenge_mode:
+            if user.id == self.creator_id:
+                return False, "❌ 你是出題者，不能猜這題。"
+            if self.target_user_id and user.id != self.target_user_id:
+                return False, f"❌ 這題指定給 {self.target_user.mention} 挑戰。"
+            if self.player_id is None:
+                self.player_id = user.id
+                self.player = user
+                return True, None
+            if user.id != self.player_id:
+                return False, "❌ 這局已由其他玩家進行中。"
+            return True, None
+
+        if user.id != self.player_id:
+            return False, "❌ 這不是你的幾A幾B遊戲。"
+        return True, None
+
+    def validate_guess(self, guess: str):
+        return self.cog._validate_ab_input(guess, self.length)
+
+    def apply_guess(self, guess: str):
+        self.tries += 1
+        a_count, b_count = self.cog._calc_ab(self.answer, guess)
+        self.history.append((guess, a_count, b_count))
+        if a_count == self.length:
+            self.is_solved = True
+            self._try_settle_reward()
+
+    def _get_settlement_rule(self):
+        rules = {
+            3: {"limit": 8, "win": 15000000, "loss": -10000000},
+            4: {"limit": 8, "win": 15000000, "loss": -10000000},
+            5: {"limit": 10, "win": 30000000, "loss": -20000000},
+            6: {"limit": 12, "win": 50000000, "loss": -30000000},
+        }
+        return rules.get(self.length)
+
+    def _try_settle_reward(self):
+        if self.challenge_mode or self.settlement_applied:
+            return
+
+        rule = self._get_settlement_rule()
+        if not rule:
+            self.settlement_applied = True
+            self.settlement_text = "ℹ️ 此長度沒有獎懲規則。"
+            return
+
+        if self.guild_id is None or self.player_id is None:
+            self.settlement_applied = True
+            self.settlement_text = "⚠️ 無法結算（僅限伺服器內可結算）。"
+            return
+
+        delta = rule["win"] if self.tries <= rule["limit"] else rule["loss"]
+
+        bank = self.cog.bank
+        if not bank or not hasattr(bank, 'add_stats'):
+            bank = self.cog._find_bank_cog()
+            self.cog.bank = bank
+
+        if not bank:
+            self.settlement_applied = True
+            self.settlement_delta = delta
+            self.settlement_text = "⚠️ 銀行系統未就緒，暫時無法結算。"
+            return
+
+        try:
+            user_data = bank.add_stats(self.guild_id, self.player_id, coin=delta)
+            bank.save_data()
+            self.settlement_balance = user_data.get("coin", 0)
+            self.settlement_delta = delta
+            self.settlement_applied = True
+            if delta >= 0:
+                self.settlement_text = f"🎁 獎勵 **{delta:,}**（{rule['limit']} 次內答對）"
+            else:
+                self.settlement_text = f"💸 懲罰 **{abs(delta):,}**（超過 {rule['limit']} 次）"
+        except Exception as e:
+            print(f"[AB結算] 結算失敗: {e}")
+            self.settlement_applied = True
+            self.settlement_delta = delta
+            self.settlement_text = "⚠️ 結算時發生錯誤。"
+
+    def reset_game(self):
+        self.answer = self.cog._generate_ab_answer(self.length)
+        self.tries = 0
+        self.history = []
+        self.is_solved = False
+        self.sync_buttons()
+
+    def build_embed(self):
+        embed = discord.Embed(title="🐮 幾A幾B", color=0x5865F2)
+
+        if self.is_solved:
+            embed.description = (
+                f"✅ 完成！答案是 **{self.answer}**\n"
+                f"次數: **{self.tries}**"
+            )
+            if not self.challenge_mode and self.settlement_text:
+                embed.description += f"\n{self.settlement_text}"
+                if self.settlement_balance is not None:
+                    embed.description += f"\n目前餘額: **{self.settlement_balance:,}**"
+        else:
+            if self.challenge_mode:
+                challenger = self.player.mention if self.player else "（等待挑戰者）"
+                if self.target_user:
+                    challenger = f"{self.target_user.mention}（指定）"
+                embed.description = (
+                    f"出題者: {self.creator.mention}\n"
+                    f"挑戰者: {challenger}\n"
+                    f"規則: 長度 **{self.length}**、不重複數字、不可前導 0\n"
+                    f"次數: **{self.tries}**"
+                )
+            else:
+                embed.description = (
+                    f"規則: 長度 **{self.length}**、不重複數字、不可前導 0\n"
+                    f"次數: **{self.tries}**"
+                )
+                rule = self._get_settlement_rule()
+                if rule:
+                    embed.description += (
+                        f"\n獎懲: {rule['limit']} 次內 +{rule['win']:,}，"
+                        f"超過 {rule['limit']} 次 {rule['loss']:,}"
+                    )
+
+        if self.history:
+            record_lines = [f"`{g}` → **{a}A{b}B**" for g, a, b in self.history[-12:]]
+            record_text = "\n".join(record_lines)
+        else:
+            record_text = "（尚無紀錄）"
+
+        embed.add_field(name="紀錄", value=record_text, inline=False)
+
+        thumb_user = self.player if self.player else self.creator
+        if thumb_user and thumb_user.display_avatar:
+            embed.set_thumbnail(url=thumb_user.display_avatar.url)
+
+        return embed
+
+    @discord.ui.button(label="🎯 猜答案", style=discord.ButtonStyle.primary)
+    async def action_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        allowed, msg = self.ensure_player(interaction.user)
+        if not allowed:
+            return await interaction.response.send_message(msg, ephemeral=True)
+
+        if self.is_solved:
+            if self.challenge_mode:
+                return await interaction.response.send_message("✅ 這局已完成。", ephemeral=True)
+            new_view = ABGameView(
+                self.cog,
+                interaction.user,
+                self.length,
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
+            return await interaction.response.send_message(embed=new_view.build_embed(), view=new_view)
+        await interaction.response.send_modal(ABGuessModal(self))
 
 # tts
 """ class NeuroSmartGenerator:
@@ -383,7 +611,8 @@ class MyCommands(commands.Cog):
             content = (message.content or "").replace("\n", "\\n")
             if not content:
                 if message.attachments:
-                    content = f"[附件 {len(message.attachments)}]"
+                    attach_parts = [f"{att.filename}: {att.url}" for att in message.attachments]
+                    content = f"[附件 {len(message.attachments)}] " + " | ".join(attach_parts)
                 elif message.embeds:
                     content = f"[Embed {len(message.embeds)}]"
                 else:
@@ -618,7 +847,8 @@ class MyCommands(commands.Cog):
         self.voice_event_log = deque(maxlen=20000)
         self.tracked_log_channels = self._load_tracked_log_channels()
         self.tracked_voice_channels = self._load_tracked_voice_channels()
-        self.GUILD_ID = 1446838276249096228  # 目標伺服器 ID
+        self.GUILD_IDS = [int(x) for x in getattr(self.bot, "guild_ids", [1446838276249096228])]
+        self.GUILD_ID = self.GUILD_IDS[0] if self.GUILD_IDS else 1446838276249096228  # 終端預設操作伺服器
         print("[Path Debug] __file__:", os.path.abspath(__file__))
         print("[Path Debug] cwd:", os.getcwd())
         print("[Path Debug] idiom_file:", self.idiom_file)
@@ -692,6 +922,44 @@ class MyCommands(commands.Cog):
             value -= 10
             aces -= 1
         return value
+
+    def _generate_ab_answer(self, length: int) -> str:
+        first = random.choice("123456789")
+        remain_pool = [ch for ch in "0123456789" if ch != first]
+        others = random.sample(remain_pool, length - 1)
+        return first + "".join(others)
+
+    def _validate_ab_input(self, number: str, length: int):
+        value = (number or "").strip()
+        if len(value) != int(length):
+            return f"❌ 請輸入剛好 {length} 位數字。"
+        if not value.isdigit():
+            return "❌ 只能輸入數字。"
+        if value[0] == "0":
+            return "❌ 不可前導 0。"
+        if len(set(value)) != len(value):
+            return "❌ 每一位數字不能重複。"
+        return None
+
+    def _fixed_deposit_rate(self, term_days: int):
+        if term_days <= 1:
+            return 0.1
+        if term_days <= 3:
+            return 0.25
+        if term_days <= 5:
+            return 0.6
+        return 1.2
+
+    def _parse_fd_time(self, value: str):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    def _calc_ab(self, answer: str, guess: str):
+        a_count = sum(1 for i, ch in enumerate(guess) if answer[i] == ch)
+        b_count = sum(1 for ch in guess if ch in answer) - a_count
+        return a_count, b_count
 
     def load_stock_cache(self):
         if os.path.exists(self.stock_cache_file):
@@ -1033,20 +1301,12 @@ class MyCommands(commands.Cog):
         try:
             if hasattr(ctx, "response") and not ctx.response.is_done():
                 await ctx.response.send_message(embed=embed, ephemeral=ephemeral)
+            elif hasattr(ctx, "followup"):
+                await ctx.followup.send(embed=embed, ephemeral=ephemeral)
             else:
                 await ctx.send(embed=embed, ephemeral=ephemeral)
         except Exception as e:
             print(f"⚠️ 發送釣魚 UI 失敗: {e}")
-
-        async def _send_fishing_embed(self, ctx, type_, data, ephemeral=True):
-            embed = self._build_fishing_embed(type_, data)
-            try:
-                if hasattr(ctx, "response") and not ctx.response.is_done():
-                    await ctx.response.send_message(embed=embed, ephemeral=ephemeral)
-                else:
-                    await ctx.send(embed=embed, ephemeral=ephemeral)
-            except Exception as e:
-                print(f"⚠️ 發送釣魚 UI 失敗: {e}")
     async def process_bj_control(self, args):
         """處理終端指令 bj <display_name> <mode>（由 main.py 終端機轉發）"""
         try:
@@ -1177,6 +1437,38 @@ class MyCommands(commands.Cog):
             return
         self.last_word = word
         await interaction.response.send_message(f"🏁 成語接龍開始！\n當前成語：**{word}**\n請接下一個字：**{word[-1]}**")
+
+    @app_commands.command(name="ab", description="幾A幾B（電腦出題）")
+    @app_commands.describe(length="題目長度（3~6 位，預設 4）")
+    async def ab(self, interaction: discord.Interaction, length: app_commands.Range[int, 3, 6] = 4):
+        view = ABGameView(self, interaction.user, int(length), guild_id=interaction.guild.id if interaction.guild else None)
+        await interaction.response.send_message(embed=view.build_embed(), view=view)
+
+    @app_commands.command(name="ab_set", description="自訂幾A幾B題目給別人猜")
+    @app_commands.describe(length="題目長度（3~6 位）", answer="你要出的答案（不可重複、不可前導0）", user="指定挑戰者")
+    async def ab_set(self, interaction: discord.Interaction, length: app_commands.Range[int, 3, 6], answer: str, user: discord.Member):
+        clean_answer = (answer or "").strip()
+        error = self._validate_ab_input(clean_answer, int(length))
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
+        if user.id == interaction.user.id:
+            return await interaction.response.send_message("❌ 不能指定自己當挑戰者。", ephemeral=True)
+
+        view = ABGameView(
+            self,
+            interaction.user,
+            int(length),
+            answer=clean_answer,
+            challenge_mode=True,
+            target_user=user,
+            guild_id=interaction.guild.id if interaction.guild else None,
+        )
+        await interaction.response.send_message(
+            content=f"🧩 {interaction.user.mention} 出了一題幾A幾B，指定 {user.mention} 挑戰！",
+            embed=view.build_embed(),
+            view=view,
+        )
 
     # 整合 Bank 系統的 21 點
     @app_commands.command(name="blackjack", description="跟我玩一場 21 點！")
@@ -1723,41 +2015,35 @@ class MyCommands(commands.Cog):
 
         stock_summary = ""
         if user_stocks:
-            for ticker, amount in user_stocks.items():
-                info = daily_cache.get(ticker)
-                if info:
-                    value = info['price'] * amount
+            for ticker, info in user_stocks.items():
+                qty = info.get("qty", 0)
+                current_price = daily_cache.get(ticker)
+                if current_price is not None:
+                    value = qty * current_price
                     total_stock_value += value
-                stock_summary += f"📈 {ticker}: `{amount:,}` 股\n"
+                    stock_summary += f"`{ticker}` × {qty} = `${value:,.0f}`\n"
+                else:
+                    stock_summary += f"`{ticker}` × {qty} = (價格抓取失敗)\n"
         else:
-            stock_summary = "目前無持股"
+            stock_summary = "目前沒有持股"
 
-        # 3. 製作 Embed 面板
+        # 3. 計算總資產
+        net_worth = coin + total_stock_value
+
+        # 4. 製作 Embed
         embed = discord.Embed(
-            title=f"{interaction.user.display_name} 的個人檔案",
-            color=interaction.user.color, # 自動抓取使用者的身分組顏色
-            timestamp=datetime.now()
+            title=f"📊 {interaction.user.display_name} 的個人資料",
+            color=0x9b59b6
         )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(name="💰 現金", value=f"`${coin:,}`", inline=True)
+        embed.add_field(name="⭐ 經驗值", value=f"`{exp:,}`", inline=True)
+        embed.add_field(name="📈 股票總市值", value=f"`${total_stock_value:,.0f}`", inline=True)
+        embed.add_field(name="💎 總資產", value=f"**`${net_worth:,.0f}`**", inline=False)
+        embed.add_field(name="📦 持股明細", value=stock_summary[:1024], inline=False)
+        embed.set_footer(text=f"伺服器：{interaction.guild.name} | 查詢時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-        # 設定頭像
-        if interaction.user.avatar:
-            embed.set_thumbnail(url=interaction.user.avatar.url)
-
-        # 基礎資訊
-        embed.add_field("經驗值: `{exp}`", inline=True)
-        embed.add_field(name="💰 現金餘額", value=f"`{coin:,}` 金幣", inline=True)
-
-        # 資產資訊
-        net_worth = coin + int(total_stock_value)
-        embed.add_field(name="🏦 總資產淨值", value=f"**`{net_worth:,}`** 金幣", inline=False)
-
-        # 股票清單
-        embed.add_field(name="📦 股票庫存", value=stock_summary, inline=False)
-
-        embed.set_footer(text=f"{interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
-
-    # 幸運轉盤指令
     @app_commands.command(name="spin", description="花費金幣進行幸運大轉盤 (下注 5000)")
     @app_commands.guild_only()
     async def spin(self, interaction: discord.Interaction):
@@ -2105,37 +2391,142 @@ class MyCommands(commands.Cog):
         except:
             pass
 
-    @app_commands.command(name="deposit", description="將身上的現金存入金庫")
+    @app_commands.command(name="deposit", description="定存系統：開單、查詢、到期領回")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="📝 開定存", value="open"),
+        app_commands.Choice(name="📋 查定存", value="status"),
+        app_commands.Choice(name="💸 領到期", value="claim")
+    ])
+    @app_commands.describe(action="操作類型", amount="定存本金（開定存時必填）", days="定存天數（1~90，開定存時必填）")
     @app_commands.guild_only()
-    async def deposit(self, interaction: discord.Interaction, amount: int):
-        if amount <= 0:
-            return await interaction.response.send_message("❌ 存入金額必須大於 0！", ephemeral=True)
+    async def deposit(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        amount: int = 0,
+        days: app_commands.Range[int, 1, 90] = 7,
+    ):
 
-        # --- 跨模組抓取 BankMod ---
         bank_cog = self.bot.get_cog('BankMod')
         if not bank_cog:
             return await interaction.response.send_message("❌ 系統錯誤：找不到金庫模組！", ephemeral=True)
 
-        # 使用 bank_cog 呼叫功能
         user_data = bank_cog.add_stats(interaction.guild.id, interaction.user.id)
+        if "fixed_deposits" not in user_data or not isinstance(user_data.get("fixed_deposits"), list):
+            user_data["fixed_deposits"] = []
 
-        # 檢查現金
-        current_cash = user_data.get("coin", 0)
-        if current_cash < amount:
-            return await interaction.response.send_message(f"❌ 你手上的現金不足！(目前持有: `${current_cash:,}`)", ephemeral=True)
+        if action.value == "open":
+            if amount <= 0:
+                return await interaction.response.send_message("❌ 定存本金必須大於 0！", ephemeral=True)
 
-        # 執行轉帳
-        user_data["coin"] -= amount
-        user_data["bank_balance"] = user_data.get("bank_balance", 0) + amount
+            current_cash = user_data.get("coin", 0)
+            if current_cash < amount:
+                return await interaction.response.send_message(
+                    f"❌ 你手上的現金不足！(目前持有: `${current_cash:,}`)",
+                    ephemeral=True
+                )
 
-        # 呼叫 bank_cog 的存檔
-        bank_cog.save_data()
+            rate = self._fixed_deposit_rate(int(days))
+            now = datetime.now()
+            mature_at = now + timedelta(days=int(days))
 
-        embed = discord.Embed(title="🏦 金庫存款成功", color=0x2ecc71)
-        embed.add_field(name="💰 存入金額", value=f"`${amount:,}`\n")
-        embed.add_field(name="🏧 剩餘現金", value=f"`${user_data['coin']:,}` \n")
-        embed.add_field(name="🏛️ 金庫總額", value=f"`${user_data['bank_balance']:,}` \n")
-        await interaction.response.send_message(embed=embed)
+            user_data["coin"] -= amount
+            user_data["fixed_deposits"].append({
+                "principal": int(amount),
+                "term_days": int(days),
+                "rate": rate,
+                "opened_at": now.isoformat(),
+                "mature_at": mature_at.isoformat(),
+            })
+            bank_cog.save_data()
+
+            expected_interest = int(amount * rate)
+            expected_total = int(amount + expected_interest)
+            embed = discord.Embed(title="🏦 定存開單成功", color=0x2ecc71)
+            embed.add_field(name="💰 本金", value=f"`${amount:,}`", inline=True)
+            embed.add_field(name="📆 期數", value=f"`{int(days)}` 天", inline=True)
+            embed.add_field(name="📈 利率", value=f"`{rate*100:.2f}%`", inline=True)
+            embed.add_field(name="⏰ 到期時間", value=f"<t:{int(mature_at.timestamp())}:F>", inline=False)
+            embed.add_field(name="🧾 預估利息", value=f"`${expected_interest:,}`", inline=True)
+            embed.add_field(name="💎 到期可領", value=f"`${expected_total:,}`", inline=True)
+            embed.add_field(name="👜 目前現金", value=f"`${user_data['coin']:,}`", inline=False)
+            return await interaction.response.send_message(embed=embed)
+
+        if action.value == "claim":
+            now = datetime.now()
+            matured = []
+            pending = []
+            for item in user_data.get("fixed_deposits", []):
+                mature_at = self._parse_fd_time(item.get("mature_at", ""))
+                if mature_at and mature_at <= now:
+                    matured.append(item)
+                else:
+                    pending.append(item)
+
+            if not matured:
+                return await interaction.response.send_message("❌ 目前沒有已到期的定存。", ephemeral=True)
+
+            payout_total = 0
+            interest_total = 0
+            principal_total = 0
+            for item in matured:
+                principal = int(item.get("principal", 0))
+                rate = float(item.get("rate", 0.0))
+                interest = int(principal * rate)
+                payout = principal + interest
+                principal_total += principal
+                interest_total += interest
+                payout_total += payout
+
+            user_data["coin"] += payout_total
+            user_data["fixed_deposits"] = pending
+            bank_cog.save_data()
+
+            embed = discord.Embed(title="💸 定存領回成功", color=0x3498db)
+            embed.add_field(name="📦 到期筆數", value=f"`{len(matured)}`", inline=True)
+            embed.add_field(name="💰 本金合計", value=f"`${principal_total:,}`", inline=True)
+            embed.add_field(name="🧾 利息合計", value=f"`${interest_total:,}`", inline=True)
+            embed.add_field(name="🎉 本次入帳", value=f"`${payout_total:,}`", inline=False)
+            embed.add_field(name="👜 目前現金", value=f"`${user_data['coin']:,}`", inline=False)
+            return await interaction.response.send_message(embed=embed)
+
+        deposits = user_data.get("fixed_deposits", [])
+        if not deposits:
+            return await interaction.response.send_message("📭 目前沒有任何定存單。", ephemeral=True)
+
+        now = datetime.now()
+        sorted_items = sorted(
+            deposits,
+            key=lambda x: self._parse_fd_time(x.get("mature_at", "")) or datetime.max
+        )
+        lines = []
+        total_principal = 0
+        total_expected = 0
+        for idx, item in enumerate(sorted_items[:10], 1):
+            principal = int(item.get("principal", 0))
+            rate = float(item.get("rate", 0.0))
+            mature_at = self._parse_fd_time(item.get("mature_at", ""))
+            expected = principal + int(principal * rate)
+            total_principal += principal
+            total_expected += expected
+            if mature_at:
+                if mature_at <= now:
+                    state = "已到期"
+                else:
+                    state = f"<t:{int(mature_at.timestamp())}:R>"
+            else:
+                state = "時間資料異常"
+            lines.append(f"`#{idx}` 本金 `${principal:,}` → 到期 `${expected:,}` | {state}")
+
+        desc = "\n".join(lines)
+        if len(sorted_items) > 10:
+            desc += f"\n... 其餘 `{len(sorted_items)-10}` 筆未顯示"
+
+        embed = discord.Embed(title="📋 定存清單", description=desc, color=0xf1c40f)
+        embed.add_field(name="📦 筆數", value=f"`{len(sorted_items)}`", inline=True)
+        embed.add_field(name="💰 本金總計", value=f"`${total_principal:,}`", inline=True)
+        embed.add_field(name="💎 預估到期總額", value=f"`${total_expected:,}`", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # 從銀行提領
     @app_commands.command(name="withdraw", description="從金庫提領現金到身上")
@@ -2208,10 +2599,9 @@ class MyCommands(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
     # 釣魚
-    @app_commands.command(name="fish", description="開始掛機釣魚（漁船影響速度、魚竿影響品質；次數 1~5000）")
-    @app_commands.describe(times="釣魚次數（1~5000，預設 1）")
+    @app_commands.command(name="fish", description="開啟釣魚管理面板（出海、收成都在這裡！）")
     @app_commands.guild_only()
-    async def fish(self, interaction: discord.Interaction, times: int = 1):
+    async def fish(self, interaction: discord.Interaction):
         """主流程分流，具體行為分派到獨立方法"""
         uid = interaction.user.id
         now = datetime.now()
@@ -2228,6 +2618,14 @@ class MyCommands(commands.Cog):
                     pass
             if end_time and now >= end_time:
                 await self.finish_fishing(interaction, uid_str)
+                bank = self.bot.get_cog('BankMod')
+                user_data = bank.add_stats(interaction.guild.id, interaction.user.id) if bank else {}
+                boat_lv = user_data.get("boat_level", 1)
+                rod_lv = user_data.get("rod_level", 1)
+                last_times = status.get("times", 1)
+                hub_view = FishingHubView(self, interaction.user.id, boat_lv, rod_lv, default_times=last_times)
+                embed = hub_view._generate_embed()
+                await interaction.followup.send(content="**✅ 上次漁獲已收成！要再次派遣船隻出海嗎？**", embed=embed, view=hub_view)
                 return
             if end_time and now < end_time:
                 remaining = end_time - now
@@ -2251,10 +2649,13 @@ class MyCommands(commands.Cog):
                 )
                 await interaction.response.send_message(embed=embed, view=active_view)
                 return
-        if times < 1 or times > 5000:
-            await interaction.response.send_message("❌ `times` 必須介於 1~5000（例如：`/fish times:100`）。", ephemeral=True)
-            return
-        await self._handle_fish_start(interaction, times)
+        bank = self.bot.get_cog('BankMod')
+        user_data = bank.add_stats(interaction.guild.id, interaction.user.id) if bank else {}
+        boat_lv = user_data.get("boat_level", 1)
+        rod_lv = user_data.get("rod_level", 1)
+        hub_view = FishingHubView(self, interaction.user.id, boat_lv, rod_lv)
+        embed = hub_view._generate_embed()
+        await interaction.response.send_message(embed=embed, view=hub_view)
     async def finish_fishing(self, ctx, user_id_str):
         """結算釣魚，顯示 UI、給錢、清除紀錄（可供 /fish 與 on_ready 共用）"""
         all_fishers = self.get_all_fishers()
@@ -2325,7 +2726,11 @@ class MyCommands(commands.Cog):
         rod_lv = user_data.get("rod_level", 1)
         cost = times * 50
         if user_data.get("coin", 0) < cost:
-            await interaction.response.send_message(f"❌ 現金不足！需要 `${cost:,}`。", ephemeral=True)
+            msg = f"❌ 現金不足！需要 `${cost:,}`。"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.followup.send(msg, ephemeral=True)
             return
         per_fish_time = max(0.5, 10.0 - (boat_lv - 1) * 0.5)
         duration = int(times * per_fish_time)
@@ -2341,7 +2746,10 @@ class MyCommands(commands.Cog):
         }
         view = FishConfirmView(interaction, self, times, cost, boat_lv, rod_lv, per_fish_time, duration, finish_time)
         embed = self._build_fishing_embed('start', data)
-        await interaction.response.send_message(embed=embed, view=view)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed, view=view)
+        else:
+            await interaction.followup.send(embed=embed, view=view)
     async def execute_fish_start(self, interaction: discord.Interaction, fish_view):
         """確認出海後執行：扣款、計算收益、儲存、啟動計時器"""
         uid = fish_view.uid
@@ -2444,7 +2852,10 @@ class MyCommands(commands.Cog):
             embed.add_field(name="💰 最終收益", value=f"**`${data.get('total_reward',0):,}`**", inline=True)
 
             # 建立再次拋竿按鈕（若要）
-            view = FishingView(interaction, self)
+            boat_lv = data.get('boat_level', 1)
+            rod_lv = data.get('rod_level', 1)
+            last_times = data.get('times', 1)
+            view = FishingHubView(self, uid, boat_lv, rod_lv, default_times=last_times)
 
             sent = False
             try:
@@ -2611,6 +3022,7 @@ class MyCommands(commands.Cog):
                 if cmd == "help":
                     print("\n" + "═"*25 + " 終端指令表 " + "═"*25)
                     print("【一、伺服器核心 (Server)】")
+                    print(f"  {'guilds / setguild [GID]':<25} | 列出/切換終端預設伺服器")
                     print(f"  {'rename [名稱]':<23} | 變更伺服器名稱")
                     print(f"  {'security [0-4]':<25} | 調整驗證門檻 (0-4)")
                     print(f"  {'audit':<25} | 顯示最新 20 筆審核日誌")
@@ -2630,6 +3042,7 @@ class MyCommands(commands.Cog):
                     print(f"  {'history [CID] [量]':<25} | 查看最新聊天紀錄並輸出TXT (預設20, 上限5000)")
                     print(f"  {'rm-chan [ID]':<25} | 刪除頻道/類別")
                     print(f"  {'purge [ID] [量]':<24} | 批量刪除訊息")
+                    print(f"  {'chanvis [CID] [m/r] [ID] [on/off]':<25} | 調整頻道可見權限(成員/身分組)")
                     print("\n【四、語音與視訊 (Voice)】")
                     print(f"  {'vcstatus':<25} | 查看目前語音頻道使用狀態")
                     print(f"  {'vctrack [CID] [on/off]':<25} | 開關語音頻道自動加入追蹤")
@@ -2668,6 +3081,43 @@ class MyCommands(commands.Cog):
                     level = getattr(discord.VerificationLevel, ['none', 'low', 'medium', 'high', 'highest'][int(args[0])])
                     asyncio.run_coroutine_threadsafe(self.bot.get_guild(self.GUILD_ID).edit(verification_level=level), self.bot.loop)
                     print(f"✅ 驗證等級已調至: {level}")
+
+                elif cmd == "guilds":
+                    ids = [int(x) for x in getattr(self, "GUILD_IDS", [self.GUILD_ID])]
+                    if not ids:
+                        print("(目前沒有設定 GUILD_IDS)")
+                        continue
+
+                    print("\n--- 🌐 已設定伺服器清單 ---")
+                    print(f"目前預設: {self.GUILD_ID}")
+                    for gid in ids:
+                        guild = self.bot.get_guild(gid)
+                        gname = guild.name if guild else "(機器人未加入或尚未快取)"
+                        mark = "*" if gid == self.GUILD_ID else " "
+                        print(f"{mark} {gid} | {gname}")
+
+                elif cmd == "setguild":
+                    if not args:
+                        print("❌ 用法: setguild [GID]")
+                        continue
+                    try:
+                        gid = int(args[0])
+                    except ValueError:
+                        print("❌ GID 必須是數字。")
+                        continue
+
+                    ids = [int(x) for x in getattr(self, "GUILD_IDS", [self.GUILD_ID])]
+                    if gid not in ids:
+                        print("❌ 該 GID 不在 GUILD_IDS 設定清單中。")
+                        continue
+
+                    guild = self.bot.get_guild(gid)
+                    if not guild:
+                        print("❌ 機器人尚未加入該伺服器，或尚未取得快取。")
+                        continue
+
+                    self.GUILD_ID = gid
+                    print(f"✅ 已切換終端預設伺服器為: {guild.name} ({gid})")
 
                 elif cmd == "add-admin":
                     guild = self.bot.get_guild(self.GUILD_ID)
@@ -2733,6 +3183,82 @@ class MyCommands(commands.Cog):
                     print("啟用權限：")
                     for p in enabled:
                         print(f"- {p}")
+
+                elif cmd == "chanvis":
+                    # chanvis [CID] [m/r] [ID] [on/off]
+                    if len(args) < 4:
+                        print("❌ 用法: chanvis [CID] [m/r] [ID] [on/off]")
+                        print("   例: chanvis 123456789012345678 m 111111111111111111 on")
+                        continue
+
+                    try:
+                        channel_id = int(args[0])
+                    except ValueError:
+                        print("❌ 頻道ID 必須是數字。")
+                        continue
+
+                    target_type = args[1].lower().strip()
+                    if target_type not in ("m", "r"):
+                        print("❌ 第二參數必須是 m(成員) 或 r(身分組)。")
+                        continue
+
+                    try:
+                        target_id = int(args[2])
+                    except ValueError:
+                        print("❌ 目標ID 必須是數字。")
+                        continue
+
+                    action = args[3].lower().strip()
+                    if action not in ("on", "off"):
+                        print("❌ 第四參數必須是 on 或 off。")
+                        continue
+
+                    guild = self.bot.get_guild(self.GUILD_ID)
+                    if not guild:
+                        print("❌ 找不到目標伺服器。")
+                        continue
+
+                    channel = self.bot.get_channel(channel_id)
+                    if not channel or not isinstance(channel, discord.TextChannel):
+                        print("❌ 找不到文字頻道，請確認 CID。")
+                        continue
+
+                    me = guild.me or guild.get_member(self.bot.user.id)
+                    if not me:
+                        print("❌ 找不到機器人伺服器身分。")
+                        continue
+
+                    if not channel.permissions_for(me).manage_channels:
+                        print("❌ 機器人沒有該頻道的 manage_channels 權限。")
+                        continue
+
+                    if target_type == "m":
+                        target = guild.get_member(target_id)
+                        if not target:
+                            print("❌ 找不到該成員。")
+                            continue
+                    else:
+                        target = guild.get_role(target_id)
+                        if not target:
+                            print("❌ 找不到該身分組。")
+                            continue
+
+                    visible = (action == "on")
+
+                    async def do_chanvis():
+                        await channel.set_permissions(
+                            target,
+                            view_channel=visible,
+                            read_message_history=visible,
+                        )
+
+                    fut = asyncio.run_coroutine_threadsafe(do_chanvis(), self.bot.loop)
+                    try:
+                        fut.result(timeout=10)
+                        state_text = "可見" if visible else "不可見"
+                        print(f"✅ 已將 #{channel.name} 對 {target.name} 設為：{state_text}")
+                    except Exception as e:
+                        print(f"❌ chanvis 執行失敗: {e}")
 
                 elif cmd == "kick":
                     guild = self.bot.get_guild(self.GUILD_ID)
@@ -2872,13 +3398,12 @@ class MyCommands(commands.Cog):
                                 content = (msg.content or "").replace("\n", "\\n")
                                 if not content:
                                     if msg.attachments:
-                                        content = f"[附件 {len(msg.attachments)}]"
+                                        attach_parts = [f"{att.filename}: {att.url}" for att in msg.attachments]
+                                        content = f"[附件 {len(msg.attachments)}] " + " | ".join(attach_parts)
                                     elif msg.embeds:
                                         content = f"[Embed {len(msg.embeds)}]"
                                     else:
                                         content = "[無文字內容]"
-                                if len(content) > 180:
-                                    content = content[:180] + "..."
                                 export_lines.append(f"[{ts}] {msg.author.display_name} ({msg.author.id}): {content}")
                                 count += 1
 
@@ -3241,9 +3766,24 @@ class MyCommands(commands.Cog):
                 await self.bot.reload_extension(ext)
             except:
                 pass
-        synced = await self.bot.tree.sync(guild=discord.Object(id=self.GUILD_ID))
-        fish_synced = any(getattr(cmd, "name", None) == "fish" for cmd in synced)
-        print(f"✅ 所有模組已重載並同步完成 | synced={len(synced)} | /fish={'OK' if fish_synced else 'MISSING'}")
+
+        guild_ids = [int(x) for x in getattr(self.bot, "guild_ids", [self.GUILD_ID])]
+        if not guild_ids:
+            synced = await self.bot.tree.sync()
+            fish_synced = any(getattr(cmd, "name", None) == "fish" for cmd in synced)
+            print(f"✅ 所有模組已重載並全域同步完成 | synced={len(synced)} | /fish={'OK' if fish_synced else 'MISSING'}")
+            return
+
+        total_synced = 0
+        fish_ok_any = False
+        for gid in guild_ids:
+            synced = await self.bot.tree.sync(guild=discord.Object(id=gid))
+            total_synced += len(synced)
+            fish_synced = any(getattr(cmd, "name", None) == "fish" for cmd in synced)
+            fish_ok_any = fish_ok_any or fish_synced
+            print(f"✅ 已同步伺服器 {gid} | synced={len(synced)} | /fish={'OK' if fish_synced else 'MISSING'}")
+
+        print(f"✅ 所有模組已重載並完成多伺服器同步 | guilds={len(guild_ids)} | total_synced={total_synced} | /fish={'OK' if fish_ok_any else 'MISSING'}")
 
 async def setup(bot):
     # 這裡檢查 bot 是否有 ai_func 屬性，如果沒有則傳入 None
