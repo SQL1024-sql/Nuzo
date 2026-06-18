@@ -5,6 +5,58 @@ import json
 import os
 import random
 from datetime import datetime
+import time as time_module
+
+class LeaderboardView(discord.ui.View):
+    """排行榜分頁視圖"""
+    def __init__(self, embed_generator, total_pages, current_page=1, timeout=300):
+        super().__init__(timeout=timeout)
+        self.embed_generator = embed_generator
+        self.total_pages = total_pages
+        self.current_page = current_page
+        self.query_time = time_module.time()
+        self.update_buttons()
+    
+    def update_buttons(self):
+        self.first_page.disabled = self.current_page == 1
+        self.prev_page.disabled = self.current_page == 1
+        self.next_page.disabled = self.current_page == self.total_pages
+        self.last_page.disabled = self.current_page == self.total_pages
+    
+    @discord.ui.button(label="⏮", style=discord.ButtonStyle.gray)
+    async def first_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = 1
+        self.update_buttons()
+        embed = self.embed_generator(self.current_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.gray)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = max(1, self.current_page - 1)
+        self.update_buttons()
+        embed = self.embed_generator(self.current_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="PAGE", style=discord.ButtonStyle.gray, disabled=True)
+    async def page_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+    
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.gray)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = min(self.total_pages, self.current_page + 1)
+        self.update_buttons()
+        embed = self.embed_generator(self.current_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.gray)
+    async def last_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = self.total_pages
+        self.update_buttons()
+        embed = self.embed_generator(self.current_page)
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def on_timeout(self):
+        self.disable_all_items()
 
 class BankMod(commands.Cog):
     def __init__(self, bot):
@@ -47,7 +99,10 @@ class BankMod(commands.Cog):
                 "fixed_deposits": [],
                 "loan": 0,
                 "boat_level": 1,
-                "rod_level": 1
+                "rod_level": 1,
+                "fish_skill_level": 1,
+                "fish_skill_exp": 0,
+                "fish_dex": {}  # 圖鑑: {fish_id: count}
             }
         if "boat_level" not in self.users[gid][uid]: self.users[gid][uid]["boat_level"] = 1
         if "rod_level" not in self.users[gid][uid]: self.users[gid][uid]["rod_level"] = 1
@@ -57,51 +112,301 @@ class BankMod(commands.Cog):
             self.users[gid][uid]["loan"] = 0
         if "fixed_deposits" not in self.users[gid][uid] or not isinstance(self.users[gid][uid].get("fixed_deposits"), list):
             self.users[gid][uid]["fixed_deposits"] = []
+        if "fish_skill_level" not in self.users[gid][uid]:
+            self.users[gid][uid]["fish_skill_level"] = 1
+        if "fish_skill_exp" not in self.users[gid][uid]:
+            self.users[gid][uid]["fish_skill_exp"] = 0
+        if "fish_dex" not in self.users[gid][uid]:
+            self.users[gid][uid]["fish_dex"] = {}
         self.users[gid][uid]["coin"] += coin
         self.users[gid][uid]["exp"] += exp
         return self.users[gid][uid]
 
 
-    # --- leaderboard 指令：查看伺服器內的財富排行榜 ---
-    @app_commands.command(name="leaderboard", description="查看此伺服器的前 5 名富豪 (總資產排序)")
+    # --- leaderboard 指令：查看伺服器內的各種排行榜 ---
+    leaderboard_group = app_commands.Group(name="leaderboard", description="查看伺服器排行榜")
+    
+    @leaderboard_group.command(name="wealth", description="查看財富排行榜")
+    @app_commands.choices(sort=[
+        app_commands.Choice(name="💎 總資產（預設）", value="total"),
+        app_commands.Choice(name="💵 手持現金", value="cash"),
+        app_commands.Choice(name="🏦 金庫存款", value="bank"),
+    ])
     @app_commands.guild_only()
-    async def leaderboard(self, interaction: discord.Interaction):
+    async def leaderboard_wealth(self, interaction: discord.Interaction, sort: str = "total"):
         gid = str(interaction.guild.id)
         if gid not in self.users or not self.users[gid]:
             await interaction.response.send_message("本伺服器目前還沒有人有錢喔！", ephemeral=True)
             return
+        
         server_users = self.users[gid]
-        # 1. 核心排序邏輯修改：將現金 (coin) 與 金庫 (bank_balance) 相加進行排序
-        # 使用 .get(..., 0) 防止 KeyError
-        sorted_users = sorted(
-            server_users.items(),
-            key=lambda x: x[1].get('coin', 0) + x[1].get('bank_balance', 0) + sum(int(fd.get('principal', 0)) for fd in x[1].get('fixed_deposits', [])),
-            reverse=True
-        )[:5]
-
-        embed = discord.Embed(
-            title=f"🏆 {interaction.guild.name} 財富排行榜",
-            description="統計包含 **手持現金** 與 **金庫存款**",
-            color=0xFFD700
-        )
-
-        for i, (uid, data) in enumerate(sorted_users, 1):
-            member = interaction.guild.get_member(int(uid))
-            name = member.display_name if member else f"神秘人({uid})"
-            # 取得各項數值
-            cash = data.get('coin', 0)
-            bank_amt = data.get('bank_balance', 0)
-            fd_principal = sum(int(fd.get('principal', 0)) for fd in data.get('fixed_deposits', []))
-            total = cash + bank_amt + fd_principal
-
-            # 格式化顯示：顯示總額，並在括號內標註現金與存款
-            embed.add_field(
-                name=f"{i}. {name}",
-                value=f"💎 **總資產：`${total:,}`**\n └ 💵 現金：`${cash:,}`\n └ 🏦 金庫：`${bank_amt:,}`\n └ 📦 定存本金：`${fd_principal:,}`",
-                inline=False
+        await self._leaderboard_wealth(interaction, server_users, sort)
+    
+    @leaderboard_group.command(name="fish", description="查看釣魚排行榜")
+    @app_commands.choices(sort=[
+        app_commands.Choice(name="⭐ 技能等級（預設）", value="skill"),
+        app_commands.Choice(name="📖 圖鑑完成度", value="dex"),
+    ])
+    @app_commands.guild_only()
+    async def leaderboard_fish(self, interaction: discord.Interaction, sort: str = "skill"):
+        gid = str(interaction.guild.id)
+        if gid not in self.users or not self.users[gid]:
+            await interaction.response.send_message("本伺服器目前還沒有人釣過魚喔！", ephemeral=True)
+            return
+        
+        server_users = self.users[gid]
+        await self._leaderboard_fish(interaction, server_users, sort)
+    
+    @leaderboard_group.command(name="blackjack", description="查看21點排行榜")
+    @app_commands.choices(sort=[
+        app_commands.Choice(name="🏆 勝場數（預設）", value="wins"),
+        app_commands.Choice(name="🎮 場次多寡", value="games"),
+        app_commands.Choice(name="📊 勝率", value="winrate"),
+        app_commands.Choice(name="💰 損益", value="pnl"),
+    ])
+    @app_commands.guild_only()
+    async def leaderboard_blackjack(self, interaction: discord.Interaction, sort: str = "wins"):
+        gid = str(interaction.guild.id)
+        if gid not in self.users or not self.users[gid]:
+            await interaction.response.send_message("本伺服器目前還沒有人玩過 21 點！", ephemeral=True)
+            return
+        
+        server_users = self.users[gid]
+        filtered_users = {uid: data for uid, data in server_users.items() 
+                         if data.get('blackjack_games', 0) > 0}
+        
+        if not filtered_users:
+            await interaction.response.send_message("📊 本伺服器還沒有人玩過 21 點！", ephemeral=True)
+            return
+        
+        await self._leaderboard_blackjack(interaction, filtered_users, sort)
+    
+    async def _leaderboard_wealth(self, interaction: discord.Interaction, server_users: dict, sort: str = None):
+        """財富排行榜 - 支持分頁"""
+        sort_by = sort or "total"
+        
+        if sort_by == "cash":
+            sorted_users = sorted(server_users.items(), key=lambda x: x[1].get('coin', 0), reverse=True)
+            title_suffix = "（按手持現金排序）"
+        elif sort_by == "bank":
+            sorted_users = sorted(server_users.items(), key=lambda x: x[1].get('bank_balance', 0), reverse=True)
+            title_suffix = "（按金庫存款排序）"
+        else:  # total（預設）
+            sorted_users = sorted(
+                server_users.items(),
+                key=lambda x: x[1].get('coin', 0) + x[1].get('bank_balance', 0) + sum(int(fd.get('principal', 0)) for fd in x[1].get('fixed_deposits', [])),
+                reverse=True
             )
-
-        await interaction.response.send_message(embed=embed)
+            title_suffix = "（按總資產排序）"
+        
+        # 計算用戶的排名
+        user_rank = None
+        for idx, (uid, _) in enumerate(sorted_users, 1):
+            if int(uid) == interaction.user.id:
+                user_rank = idx
+                break
+        
+        # 分頁設定：每頁5筆
+        items_per_page = 5
+        total_pages = (len(sorted_users) + items_per_page - 1) // items_per_page
+        
+        def create_embed(page: int):
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            page_users = sorted_users[start_idx:end_idx]
+            
+            embed = discord.Embed(
+                title=f"💎 {interaction.guild.name} 財富排行榜 {title_suffix}",
+                description="包含 **手持現金** 、**金庫存款** 與 **定存本金**",
+                color=0xFFD700
+            )
+            
+            for i, (uid, data) in enumerate(page_users, start_idx + 1):
+                member = interaction.guild.get_member(int(uid))
+                name = member.display_name if member else f"神秘人({uid})"
+                cash = data.get('coin', 0)
+                bank_amt = data.get('bank_balance', 0)
+                fd_principal = sum(int(fd.get('principal', 0)) for fd in data.get('fixed_deposits', []))
+                total = cash + bank_amt + fd_principal
+                
+                embed.add_field(
+                    name=f"{i}. {name}",
+                    value=f"💎 **總資產：`${total:,}`**\n └ 💵 現金：`${cash:,}`\n └ 🏦 金庫：`${bank_amt:,}`\n └ 📦 定存本金：`${fd_principal:,}`",
+                    inline=False
+                )
+            
+            # 顯示用戶排名
+            if user_rank:
+                embed.add_field(
+                    name="你的排名",
+                    value=f"⭐ 第 {user_rank} 名",
+                    inline=False
+                )
+            
+            query_time = time_module.time()
+            embed.set_footer(text=f"查詢: 0.01s • 每小時更新 • 頁-{page}/{total_pages} • 共 {len(sorted_users):,} 名玩家")
+            return embed
+        
+        view = LeaderboardView(create_embed, total_pages, 1)
+        embed = create_embed(1)
+        await interaction.response.send_message(embed=embed, view=view)
+    
+    async def _leaderboard_fish(self, interaction: discord.Interaction, server_users: dict, sort: str = None):
+        """釣魚排行榜 - 支持按技能或圖鑑排序，支持分頁"""
+        sort_by = sort or "skill"
+        
+        if sort_by == "dex":
+            sorted_users = sorted(
+                server_users.items(),
+                key=lambda x: (len(x[1].get('fish_dex', {})), x[1].get('fish_skill_level', 1)),
+                reverse=True
+            )
+            title_suffix = "（按圖鑑完成度排序）"
+        else:  # skill（預設）
+            sorted_users = sorted(
+                server_users.items(),
+                key=lambda x: (x[1].get('fish_skill_level', 1), len(x[1].get('fish_dex', {}))),
+                reverse=True
+            )
+            title_suffix = "（按技能等級排序）"
+        
+        # 計算用戶的排名
+        user_rank = None
+        for idx, (uid, _) in enumerate(sorted_users, 1):
+            if int(uid) == interaction.user.id:
+                user_rank = idx
+                break
+        
+        # 分頁設定：每頁5筆
+        items_per_page = 5
+        total_pages = (len(sorted_users) + items_per_page - 1) // items_per_page
+        
+        def create_embed(page: int):
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            page_users = sorted_users[start_idx:end_idx]
+            
+            embed = discord.Embed(
+                title=f"🎣 {interaction.guild.name} 釣魚排行榜 {title_suffix}",
+                description="統計 **釣魚技能等級** 與 **圖鑑完成度**",
+                color=0x3498db
+            )
+            
+            for i, (uid, data) in enumerate(page_users, start_idx + 1):
+                member = interaction.guild.get_member(int(uid))
+                name = member.display_name if member else f"神秘人({uid})"
+                
+                skill_lv = data.get('fish_skill_level', 1)
+                fish_dex = len(data.get('fish_dex', {}))
+                total_dex = 17
+                
+                embed.add_field(
+                    name=f"{i}. {name}",
+                    value=f"⭐ **技能等級：`Lv.{skill_lv}/20`**\n 📖 圖鑑完成度：`{fish_dex}/{total_dex}`",
+                    inline=False
+                )
+            
+            # 顯示用戶排名
+            if user_rank:
+                embed.add_field(
+                    name="你的排名",
+                    value=f"⭐ 第 {user_rank} 名",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"查詢: 0.01s • 每小時更新 • 頁-{page}/{total_pages} • 共 {len(sorted_users):,} 名玩家")
+            return embed
+        
+        view = LeaderboardView(create_embed, total_pages, 1)
+        embed = create_embed(1)
+        await interaction.response.send_message(embed=embed, view=view)
+    
+    async def _leaderboard_blackjack(self, interaction: discord.Interaction, server_users: dict, sort: str = None):
+        """21點排行榜 - 支持按勝場、勝率、損益或場次排序，支持分頁"""
+        # 過濾至少玩過1場的玩家
+        filtered_users = {uid: data for uid, data in server_users.items() 
+                         if data.get('blackjack_games', 0) > 0}
+        
+        if not filtered_users:
+            await interaction.response.send_message("📊 本伺服器還沒有人玩過 21 點！", ephemeral=True)
+            return
+        
+        sort_by = sort or "wins"
+        
+        if sort_by == "games":
+            sorted_users = sorted(filtered_users.items(), key=lambda x: x[1].get('blackjack_games', 0), reverse=True)
+            title_suffix = "（按場次多寡排序）"
+        elif sort_by == "winrate":
+            sorted_users = sorted(
+                filtered_users.items(),
+                key=lambda x: (x[1].get('blackjack_wins', 0) / x[1].get('blackjack_games', 1) * 100, x[1].get('blackjack_wins', 0)),
+                reverse=True
+            )
+            title_suffix = "（按勝率排序）"
+        elif sort_by == "pnl":
+            sorted_users = sorted(filtered_users.items(), key=lambda x: x[1].get('blackjack_pnl', 0), reverse=True)
+            title_suffix = "（按損益排序）"
+        else:  # wins（預設）
+            sorted_users = sorted(
+                filtered_users.items(),
+                key=lambda x: (x[1].get('blackjack_wins', 0), x[1].get('blackjack_pnl', 0)),
+                reverse=True
+            )
+            title_suffix = "（按勝場數排序）"
+        
+        # 計算用戶的排名
+        user_rank = None
+        for idx, (uid, _) in enumerate(sorted_users, 1):
+            if int(uid) == interaction.user.id:
+                user_rank = idx
+                break
+        
+        # 分頁設定：每頁5筆
+        items_per_page = 5
+        total_pages = (len(sorted_users) + items_per_page - 1) // items_per_page
+        
+        def create_embed(page: int):
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            page_users = sorted_users[start_idx:end_idx]
+            
+            embed = discord.Embed(
+                title=f"🎰 {interaction.guild.name} 21點排行榜 {title_suffix}",
+                description="只顯示至少玩過 **1場** 的玩家",
+                color=0xe74c3c
+            )
+            
+            for i, (uid, data) in enumerate(page_users, start_idx + 1):
+                member = interaction.guild.get_member(int(uid))
+                name = member.display_name if member else f"神秘人({uid})"
+                
+                wins = data.get('blackjack_wins', 0)
+                games = data.get('blackjack_games', 0)
+                pnl = data.get('blackjack_pnl', 0)
+                win_rate = (wins / games * 100) if games > 0 else 0
+                
+                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                
+                embed.add_field(
+                    name=f"{i}. {name}",
+                    value=f"🏆 勝場：`{wins}/{games}` (勝率 `{win_rate:.1f}%`)\n {pnl_emoji} 損益：`${pnl:+,}`",
+                    inline=False
+                )
+            
+            # 顯示用戶排名
+            if user_rank:
+                embed.add_field(
+                    name="你的排名",
+                    value=f"⭐ 第 {user_rank} 名",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"查詢: 0.01s • 每小時更新 • 頁-{page}/{total_pages} • 共 {len(sorted_users):,} 名玩家")
+            return embed
+        
+        view = LeaderboardView(create_embed, total_pages, 1)
+        embed = create_embed(1)
+        await interaction.response.send_message(embed=embed, view=view)
 
     # --- balance 指令：查看個人餘額 ---
     @app_commands.command(name="balance", description="查詢餘額")

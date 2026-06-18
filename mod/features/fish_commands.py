@@ -77,47 +77,23 @@ class FishCommandsMixin:
         })
 
     async def do_fish_settlement(self, interaction_or_ctx, user_id_str):
-        all_fishers = self.get_all_fishers()
-        data = all_fishers.get(user_id_str)
-        if not data:
-            return
-
-        rarity_counts = data.get("rarity_counts", {})
-        total_reward = data.get("total_reward", 0)
-
-        summary = "\n".join([f"• {r}: {count}次" for r, count in rarity_counts.items()])
-        embed = discord.Embed(title="🎣 釣魚成果報告", color=0x2ecc71)
-        display_name = data.get("user_name") or f"<@{user_id_str}>"
-        embed.description = f"{display_name} 任務已完成！這是你在這段期間的收穫："
-        embed.add_field(name="📊 捕獲統計", value=f"```\n{summary}\n```", inline=False)
-        embed.add_field(name="💰 最終收益", value=f"**`${total_reward:,}`**", inline=True)
-
-        bank = self.bot.get_cog('BankMod')
-        if bank:
-            try:
-                bank.add_stats(data.get("guild_id"), int(user_id_str), coin=total_reward)
-                bank.save_data()
-            except Exception as e:
-                print(f"⚠️ 結算時寫入銀行失敗: {e}")
-
-        self.remove_fisher(user_id_str)
-
-        try:
-            if hasattr(interaction_or_ctx, "response") and not interaction_or_ctx.response.is_done():
-                await interaction_or_ctx.response.send_message(embed=embed)
-            else:
-                await interaction_or_ctx.send(embed=embed)
-        except Exception as e:
-            print(f"⚠️ 發送釣魚結算 UI 失敗: {e}")
+        await self.finish_fishing(interaction_or_ctx, user_id_str)
 
     async def _handle_fish_start(self, interaction, times):
         bank = self.bot.get_cog('BankMod')
         user_data = bank.add_stats(interaction.guild.id, interaction.user.id)
         boat_lv = user_data.get("boat_level", 1)
         rod_lv = user_data.get("rod_level", 1)
-        cost = times * 50
+        fish_skill_lv = user_data.get("fish_skill_level", 1)
+        
+        # 基礎成本 50 元，技能每等級降低 2%（最多 20 等級 = 40% 折扣）
+        skill_discount = 1.0 - (fish_skill_lv - 1) * 0.02
+        base_cost = times * 50
+        cost = int(base_cost * skill_discount)
+        
         if user_data.get("coin", 0) < cost:
-            await interaction.response.send_message(f"❌ 現金不足！需要 `${cost:,}`。", ephemeral=True)
+            cost_needed = cost
+            await interaction.response.send_message(f"❌ 現金不足！需要 `${cost_needed:,}`。", ephemeral=True)
             return
 
         per_fish_time = max(0.5, 10.0 - (boat_lv - 1) * 0.5)
@@ -127,10 +103,12 @@ class FishCommandsMixin:
             'user_mention': interaction.user.mention,
             'boat_lv': boat_lv,
             'rod_lv': rod_lv,
+            'fish_skill_lv': fish_skill_lv,
             'per_fish_time': per_fish_time,
             'duration': duration,
             'finish_time': finish_time,
-            'cost': cost
+            'cost': cost,
+            'discount': f"{(1-skill_discount)*100:.0f}%"
         }
         view = self._make_fish_confirm_view(interaction, times, cost, boat_lv, rod_lv, per_fish_time, duration, finish_time)
         embed = self._build_fishing_embed('start', data)
@@ -153,17 +131,22 @@ class FishCommandsMixin:
         user_data["coin"] -= cost
         bank.save_data()
 
+        # 魚竿等級影響稀有度
         bonus = rod_lv - 1
+        # 釣魚技能也能提高稀有度（每等級 +0.5 稀有/傳說的權重）
+        fish_skill_bonus = max(0, (user_data.get("fish_skill_level", 1) - 1) * 0.5)
+        
         adj_weights = []
         for f in self.FISH_POOL:
             w = f["chance"]
             r = f["rarity"]
+            # 技能和魚竿都能提高稀有魚的機率
             if r == "傳說":
-                w += bonus * 1
+                w += bonus * 1 + fish_skill_bonus
             elif r == "史詩":
-                w += bonus * 1
+                w += bonus * 1 + fish_skill_bonus
             elif r == "稀有":
-                w += int(bonus * 0.5)
+                w += int(bonus * 0.5) + fish_skill_bonus * 0.5
             elif r == "垃圾":
                 w = max(5, w - int(bonus * 1.3))
             elif r == "災難":
@@ -174,8 +157,10 @@ class FishCommandsMixin:
 
         total_reward = 0
         rarity_counts = {}
+        
         for _ in range(times):
             fish_obj = random.choices(self.FISH_POOL, weights=adj_weights, k=1)[0]
+            
             price = fish_obj["price"]
             if price > 0:
                 price = int(price * (1 + (rod_lv - 1) * 0.1))
@@ -193,7 +178,8 @@ class FishCommandsMixin:
             "channel_id": interaction.channel.id,
             "boat_level": boat_lv,
             "rod_level": rod_lv,
-            "user_name": interaction.user.display_name
+            "user_name": interaction.user.display_name,
+            "fish_skill_level": user_data.get("fish_skill_level", 1)
         }
         self.update_fisher(uid, fisher_data)
 
@@ -206,6 +192,8 @@ class FishCommandsMixin:
         embed.description = (
             f"👤 **釣客：** <@{uid}>\n"
             f"🚤 **漁船等級：** `Lv.{boat_lv}`\n"
+            f"🎣 **魚竿等級：** `Lv.{rod_lv}`\n"
+            f"⭐ **釣魚技能：** `Lv.{user_data.get('fish_skill_level', 1)}`\n"
             f"⏱️ **作業速度：** `{fish_view.per_fish_time:.1f}s` / 竿\n"
             f"⏳ **總計耗時：** `約 {time_str}`\n"
             f"🔔 **回港時間：** `{finish_time.strftime('%H:%M:%S')}`\n\n"
@@ -220,13 +208,73 @@ class FishCommandsMixin:
         if str(uid) in all_fishers:
             bank = self.bot.get_cog('BankMod')
             if not bank:
+                print(f"❌ 無法取得銀行 Cog")
                 return
             data = all_fishers[str(uid)]
+            
+            # 初始化變數
+            level_ups = 0
+            current_level = 1
+            total_skill_exp = 0
+            new_fish_list = []
+            
             try:
-                bank.add_stats(data.get("guild_id"), uid, coin=data.get("total_reward", 0))
+                user_data = bank.add_stats(data.get("guild_id"), uid, coin=data.get("total_reward", 0))
+                
+                # 技能經驗改為平滑成長：避免高次數一次滿等
+                times = max(1, int(data.get("times", 1)))
+                rarity_counts = data.get('rarity_counts', {})
+
+                # 基礎經驗：每 100 竿約 1 EXP（5000 竿約 50 EXP）
+                base_exp = max(1, times // 100)
+
+                # 稀有加成改為「每 N 隻 +1」，避免依次數線性爆衝
+                rarity_bonus = 0
+                rarity_bonus += rarity_counts.get('傳說', 0) // 80
+                rarity_bonus += rarity_counts.get('史詩', 0) // 100
+                rarity_bonus += rarity_counts.get('稀有', 0) // 120
+
+                # 單次上限，防止異常資料導致暴衝
+                total_skill_exp = min(120, base_exp + rarity_bonus)
+                
+                # 升級邏輯
+                current_level = user_data.get("fish_skill_level", 1)
+                current_exp = user_data.get("fish_skill_exp", 0)
+                
+                user_data["fish_skill_exp"] = current_exp + total_skill_exp
+                
+                # 每級需要 100 經驗，最多升到 20 級
+                level_ups = 0
+                while user_data["fish_skill_exp"] >= 100 and current_level < 20:
+                    user_data["fish_skill_exp"] -= 100
+                    current_level += 1
+                    level_ups += 1
+                
+                user_data["fish_skill_level"] = current_level
+
+                # 滿等後不再累加經驗，避免數值無限膨脹
+                if current_level >= 20:
+                    user_data["fish_skill_exp"] = 100
+                
+                # 更新圖鑑
+                fish_dex = user_data.get("fish_dex", {})
+                new_fish_list = []
+                for fish in data.get("fish_caught", []):
+                    fish_id = str(fish.get("id", 0))
+                    is_new = fish_id not in fish_dex
+                    if is_new:
+                        new_fish_list.append(fish)
+                    fish_dex[fish_id] = fish_dex.get(fish_id, 0) + 1
+                
+                user_data["fish_dex"] = fish_dex
+                
+                print(f"✅ 用戶 {uid} - 技能經驗 +{total_skill_exp} (等級 {current_level}, 剩餘 EXP {user_data['fish_skill_exp']})")
+                
                 bank.save_data()
             except Exception as e:
-                print(f"⚠️ background finisher 存入獎金失敗: {e}")
+                import traceback
+                print(f"❌ background finisher 存入獎金失敗: {e}")
+                print(traceback.format_exc())
             try:
                 self.remove_fisher(str(uid))
             except Exception:
@@ -238,6 +286,21 @@ class FishCommandsMixin:
             embed.description = f"<@{uid}> 你的船隊已滿載而歸！"
             embed.add_field(name="📊 捕獲統計", value=f"```\n{summary}\n```", inline=False)
             embed.add_field(name="💰 最終收益", value=f"**`${data.get('total_reward',0):,}`**", inline=True)
+            
+            # 技能經驗信息
+            if level_ups > 0:
+                embed.add_field(name="⭐ 釣魚技能", value=f"**升級了 {level_ups} 等！** 現在 `Lv.{current_level}` 🎉", inline=True)
+            else:
+                embed.add_field(name="⭐ 釣魚技能", value=f"`Lv.{current_level}` (+{total_skill_exp} 經驗)", inline=True)
+            
+            # 新魚種通知
+            if new_fish_list:
+                new_fish_text = "\n".join([f"{f.get('emoji')} **{f.get('name')}** ({f.get('rarity')})" for f in new_fish_list])
+                embed.add_field(
+                    name="🎉 新魚種解鎖",
+                    value=new_fish_text,
+                    inline=False
+                )
 
             view = self._make_fishing_view(interaction)
 
@@ -351,4 +414,154 @@ class FishCommandsMixin:
         embed.set_author(name="NuSo 系統核心", icon_url=self.bot.user.avatar.url if self.bot.user.avatar else None)
         embed.set_footer(text="From system")
         embed.timestamp = datetime.now()
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="fish_skill", description="查看你的釣魚技能等級和經驗")
+    @app_commands.guild_only()
+    async def fish_skill(self, interaction: discord.Interaction):
+        bank = self.bot.get_cog('BankMod')
+        if not bank or not hasattr(bank, 'add_stats'):
+            return await interaction.response.send_message("❌ 銀行模組未就緒，請稍後重試。", ephemeral=True)
+        
+        user_data = bank.add_stats(interaction.guild.id, interaction.user.id)
+        
+        try:
+            skill_lv = int(user_data.get("fish_skill_level", 1))
+        except (TypeError, ValueError):
+            skill_lv = 1
+        try:
+            skill_exp = int(user_data.get("fish_skill_exp", 0))
+        except (TypeError, ValueError):
+            skill_exp = 0
+        skill_lv = max(1, min(skill_lv, 20))
+        skill_exp = max(0, skill_exp)
+        
+        # 計算進度條（固定長度，避免超過 Discord embed 欄位限制）
+        exp_needed = 100
+        progress_bar_length = 15
+        if skill_lv >= 20:
+            progress_bar = "█" * progress_bar_length
+            progress_text = f"[{progress_bar}] MAX"
+            exp_left = 0
+        else:
+            safe_exp = max(0, min(skill_exp, exp_needed))
+            filled = int((safe_exp / exp_needed) * progress_bar_length)
+            progress_bar = "█" * filled + "░" * (progress_bar_length - filled)
+            progress_text = f"[{progress_bar}] {safe_exp}/100 EXP"
+            exp_left = exp_needed - safe_exp
+        
+        # 計算效果
+        cost_discount = (skill_lv - 1) * 2
+        rarity_bonus = (skill_lv - 1) * 0.5
+        
+        embed = discord.Embed(
+            title="⭐ 釣魚技能資訊",
+            description=f"{interaction.user.mention} 的釣魚技能",
+            color=0x9b59b6
+        )
+        
+        # 等級進度
+        embed.add_field(
+            name="📊 等級進度",
+            value=f"`Lv.{skill_lv}/20` • {progress_text}",
+            inline=False
+        )
+        
+        # 技能效果
+        effects = f"💰 成本優惠：`{cost_discount}%`\n✨ 稀有度加成：`+{rarity_bonus:.1f}`"
+        embed.add_field(
+            name="🎣 技能效果",
+            value=effects,
+            inline=False
+        )
+        
+        # 升級提示
+        if skill_lv < 20:
+            embed.add_field(
+                name="🎯 升級進度",
+                value=f"還需 `{exp_left}` 經驗升級",
+                inline=False
+            )
+        
+        embed.set_footer(text="使用 /fish 進行釣魚來獲得經驗" if skill_lv < 20 else "✨ 已達到最高等級！")
+        embed.timestamp = datetime.now()
+        
+        await interaction.response.send_message(embed=embed)
+    
+    def _make_progress_bar(self, current: int, total: int, length: int = 10) -> str:
+        """生成進度條"""
+        filled = int((current / total) * length)
+        bar = "█" * filled + "░" * (length - filled)
+        percentage = int((current / total) * 100)
+        return f"`[{bar}] {percentage}%`"
+
+    @app_commands.command(name="fish_dex", description="查看你的釣魚圖鑑")
+    @app_commands.guild_only()
+    async def fish_dex(self, interaction: discord.Interaction):
+        bank = self.bot.get_cog('BankMod')
+        user_data = bank.add_stats(interaction.guild.id, interaction.user.id)
+        fish_dex = user_data.get("fish_dex", {})
+        
+        # 統計圖鑑
+        total_species = len(self.FISH_POOL)
+        caught_species = len(fish_dex)
+        completion = round((caught_species / total_species) * 100) if total_species > 0 else 0
+        
+        embed = discord.Embed(
+            title="📖 你的釣魚圖鑑",
+            description=f"{interaction.user.mention} 已捕獲 **{caught_species}/{total_species}** 種魚類",
+            color=0x3498db
+        )
+        
+        # 按稀有度分類
+        by_rarity = {}
+        for fish in self.FISH_POOL:
+            rarity = fish["rarity"]
+            if rarity not in by_rarity:
+                by_rarity[rarity] = []
+            by_rarity[rarity].append(fish)
+        
+        rarity_order = ["傳說", "史詩", "稀有", "普通", "垃圾", "災難"]
+        
+        for rarity in rarity_order:
+            if rarity not in by_rarity:
+                continue
+            
+            fish_list = by_rarity[rarity]
+            fish_info = []
+            caught_count = 0
+            
+            for fish in fish_list:
+                fish_id = str(fish["id"])
+                count = fish_dex.get(fish_id, 0)
+                caught_count += 1 if count > 0 else 0
+                
+                status = "✅" if count > 0 else "❌"
+                name = f"{status} {fish['emoji']} {fish['name']}"
+                
+                if count > 0:
+                    fish_info.append(f"{name} (×{count})")
+                else:
+                    fish_info.append(name)
+            
+            fish_text = "\n".join(fish_info)
+            progress = f"{caught_count}/{len(fish_list)}"
+            
+            embed.add_field(
+                name=f"{'⭐' * (6 - rarity_order.index(rarity))} {rarity} ({progress})",
+                value=fish_text,
+                inline=False
+            )
+        
+        # 完成度進度條
+        progress_bar = self._make_progress_bar(caught_species, total_species)
+        embed.add_field(
+            name="🏆 圖鑑完成度",
+            value=f"{progress_bar}\n**{completion}% 完成**",
+            inline=False
+        )
+        
+        embed.set_footer(text="繼續釣魚以解鎖更多魚種")
+        embed.timestamp = datetime.now()
+        
         await interaction.response.send_message(embed=embed)

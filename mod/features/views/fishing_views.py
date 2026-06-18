@@ -61,7 +61,7 @@ class FishActiveView(discord.ui.View):
             return
 
         times = data.get("times", 1)
-        original_cost = times * 50
+        original_cost = data.get("cost", times * 50)
 
         confirm_view = FishCancelConfirmView(self.cog, self.uid, original_cost, self)
         embed = discord.Embed(title="⚠️ 確認中斷釣魚？", color=0xff9900)
@@ -120,7 +120,7 @@ class FishingTimesModal(discord.ui.Modal, title='設定釣魚次數'):
         self.times_input = discord.ui.TextInput(
             label='你要釣幾次？(1~5000)',
             style=discord.TextStyle.short,
-            placeholder='每 1 次消耗 50 💰',
+            placeholder='基礎每次 50 💰，會套用技能折扣',
             default=str(self.hub_view.times),
             required=True,
             min_length=1,
@@ -141,18 +141,35 @@ class FishingTimesModal(discord.ui.Modal, title='設定釣魚次數'):
             await interaction.response.send_message("❌ 請輸入有效的數字！", ephemeral=True)
 
 class FishingHubView(discord.ui.View):
-    def __init__(self, cog_instance, uid, boat_lv, rod_lv, default_times=1):
+    def __init__(self, cog_instance, uid, guild_id, boat_lv, rod_lv, default_times=1):
         super().__init__(timeout=180)
         self.cog = cog_instance
         self.uid = uid
+        self.guild_id = guild_id
         self.boat_lv = boat_lv
         self.rod_lv = rod_lv
         self.times = default_times
         self.per_fish_time = max(0.5, 10.0 - (boat_lv - 1) * 0.5)
 
+    def _calc_discounted_cost(self):
+        fish_skill_lv = 1
+        bank = self.cog.bot.get_cog('BankMod') if hasattr(self.cog, 'bot') else None
+        if bank and self.guild_id:
+            try:
+                user_data = bank.add_stats(self.guild_id, self.uid)
+                fish_skill_lv = max(1, int(user_data.get("fish_skill_level", 1)))
+            except Exception:
+                fish_skill_lv = 1
+
+        discount_ratio = 1.0 - max(0, fish_skill_lv - 1) * 0.02
+        base_cost = self.times * 50
+        final_cost = int(base_cost * discount_ratio)
+        discount_pct = int((1 - discount_ratio) * 100)
+        return final_cost, fish_skill_lv, discount_pct
+
     def _generate_embed(self):
         from datetime import timedelta
-        cost = self.times * 50
+        cost, fish_skill_lv, discount_pct = self._calc_discounted_cost()
         duration = int(self.times * self.per_fish_time)
         hh, remainder = divmod(duration, 3600)
         mm, ss = divmod(remainder, 60)
@@ -163,6 +180,8 @@ class FishingHubView(discord.ui.View):
         embed.description = (
             f"你的船隻目前在港口待命。\n\n"
             f"🔹 **預定出航次數:** `{self.times}` 次\n"
+            f"🔹 **釣魚技能等級:** `Lv.{fish_skill_lv}`\n"
+            f"🔹 **技能成本折扣:** `-{discount_pct}%`\n"
             f"🔹 **預估花費金幣:** `{cost:,}` 💰\n"
             f"🔹 **預估花費時間:** `{time_str}`\n\n"
             f"點擊「📝 設定次數」來修改數量，確認無誤後點擊「⚓ 確定派遣」出海！"
@@ -189,7 +208,7 @@ class FishingHubView(discord.ui.View):
                 await interaction.response.edit_message(view=self)
                 return await interaction.followup.send("❌ 你已經派出船隻或有待收成的漁獲了！請先處理好再派新船。", ephemeral=True)
 
-        self.cost = self.times * 50
+        self.cost, self.fish_skill_lv, self.discount_pct = self._calc_discounted_cost()
         self.duration = int(self.times * self.per_fish_time)
         from datetime import datetime, timedelta
         self.finish_time = datetime.now() + timedelta(seconds=self.duration)
